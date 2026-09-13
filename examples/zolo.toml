@@ -3,5 +3,11 @@ name = "zolo-orm-examples"
 version = "0.1.0"
 entry = "basic.zolo"
 
+[database]
+schema = "basic.zolo"
+migrations = "migrations"
+dialect = "sqlite"
+url_env = "DATABASE_URL"
+
 [dependencies]
 orm = { path = ".." }

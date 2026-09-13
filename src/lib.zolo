@@ -298,6 +298,8 @@ struct FieldOptions {
   generated: bool = false,
   belongs_to: str = "",
   references: str = "id",
+  /// Explicit SQL literal default for schema migrations; Zolo defaults remain application-side.
+  default_sql: str = "",
 }
 
 @comptime
@@ -379,6 +381,9 @@ pub fn Model(info) -> Syntax<.Items> {
     if field.opts.generated && (!field.opts.primary_key || kind != "int") {
       panic("orm: generated requires an integer primary key")
     }
+    if field.opts.generated && field.opts.default_sql != "" {
+      panic("orm: generated key cannot declare a database default")
+    }
     if field.opts.generated && field.has_default {
       panic("orm: generated key cannot declare an application default")
     }
@@ -433,7 +438,8 @@ pub fn Model(info) -> Syntax<.Items> {
       let nullable = if field.type.is_optional { "" } else { " NOT NULL" }
       let primary = if field.opts.primary_key { " PRIMARY KEY" } else { "" }
       let unique = if field.opts.unique { " UNIQUE" } else { "" }
-      return identifier(column_name(field)) + " " + sql_type + nullable + primary + unique
+      let database_default = if field.opts.default_sql == "" { "" } else { " DEFAULT " + field.opts.default_sql }
+      return identifier(column_name(field)) + " " + sql_type + nullable + primary + unique + database_default
     },
   )
   let ddl = "CREATE TABLE IF NOT EXISTS " + table + " (" + ddl_columns.join(", ") + ")"
@@ -637,7 +643,7 @@ pub fn Model(info) -> Syntax<.Items> {
     ${relation_import}
     ${..reader_imports}
     use std::database::Database
-    @sql_schema(table: ${table_name}, source: ${info.name})
+    @sql_schema(table: ${table_name}, source: ${info.name}, ddl: ${ddl})
     pub struct ${schema_type} {
       ${..schema_fields}
     }
