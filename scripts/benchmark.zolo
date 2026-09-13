@@ -1,0 +1,88 @@
+#!/usr/bin/env zolo
+//! Insert microbenchmark: 2,000 single-row INSERT calls versus 16 chunked
+//! calls, both inside one transaction. Runs one warm-up process plus
+//! `--runs` measured processes and stores samples and medians as JSON under
+//! `target/benchmarks/<backend>.json`.
+//!
+//! Usage: `zolo run scripts/benchmark.zolo [--backend vm|native|llvm] [--runs N] [--zolo <cli>]`
+
+use std::datetime
+use std::fs
+use std::json
+use std::path
+use std::regex
+use std::stats
+use common::{package_root, user_args, fail, run_step, executable_path}
+
+@cli(name: "benchmark")
+struct Args {
+    @arg(long, default: "zolo", help: "Zolo CLI to invoke")
+    zolo: str,
+    @arg(long, default: "vm", help: "Backend: vm, native or llvm")
+    backend: str,
+    @arg(long, default: 5, help: "Measured runs (1..100)")
+    runs: int,
+}
+
+let args = Args.parse_args(user_args())
+let zolo = args.zolo
+let backend = args.backend
+let runs = args.runs
+if backend != "vm" && backend != "native" && backend != "llvm" {
+    fail("unknown backend '{backend}': expected vm, native or llvm")
+}
+if runs < 1 || runs > 100 { fail("--runs must be between 1 and 100") }
+
+let root = package_root()
+let examples = path.join(root, "examples")
+let output_root = path.join(root, "target", "benchmarks")
+fs.mkdir(output_root)
+
+run_step(sh"{zolo} install".cwd(examples), "install examples")
+
+var executable = ""
+if backend != "vm" {
+    let output = path.join(output_root, "benchmark-{backend}")
+    run_step(sh"{zolo} build --emit {backend} benchmark.zolo -o {output}".cwd(examples), "build {backend}")
+    executable = executable_path(output)
+}
+
+/// One benchmark process on the selected backend.
+fn run_once() -> Output {
+    if backend == "vm" {
+        return sh"{zolo} run benchmark.zolo --no-cache".cwd(examples).run_raw()
+    }
+    return sh"{executable}".cwd(examples).run_raw()
+}
+
+let single_samples: [float] = []
+let batch_samples: [float] = []
+let samples: [{str: float}] = []
+// Iteration 0 warms the executable and OS caches and is not recorded.
+for iteration in 0..(runs + 1) {
+    let out = run_once()
+    if out.status != 0 { fail("benchmark failed ({backend}):\n{out.stdout}{out.stderr}") }
+    let timings = regex.find("single_ms=([0-9.]+) batch_ms=([0-9.]+)", out.stdout)
+    if timings is nil { fail("missing timings: {out.stdout}") }
+    if iteration == 0 { continue }
+    let single_ms: float = tonumber(timings.groups[0])
+    let batch_ms: float = tonumber(timings.groups[1])
+    single_samples.push(single_ms)
+    batch_samples.push(batch_ms)
+    samples.push(#{single_ms: single_ms, batch_ms: batch_ms})
+}
+
+let report = #{
+    backend: backend,
+    recorded_at: datetime.to_iso(datetime.now()),
+    rows: 2000,
+    single_calls: 2000,
+    batch_calls: 16,
+    measured_runs: runs,
+    single_median_ms: stats.median(single_samples),
+    batch_median_ms: stats.median(batch_samples),
+    samples: samples,
+}
+let encoded = json.encode(report)
+fs.write(path.join(output_root, "{backend}.json"), encoded)
+print(encoded)

@@ -1,0 +1,51 @@
+//! Shared helpers for the package scripts in `scripts/`.
+//!
+//! Every script runs under the Zolo VM (`zolo run scripts/<name>.zolo`) and
+//! drives the `zolo` CLI through `sh"…"` command literals: no shell is
+//! involved, so paths and arguments are never re-interpreted.
+
+use std::env
+use std::fs
+use std::io
+use std::path
+use std::process
+
+/// Absolute package root: the parent of the `scripts/` directory.
+pub fn package_root() -> str {
+    let script = fs.abs(process.argv()[0])
+    return path.dirname(path.dirname(script))
+}
+
+/// Arguments passed after the script name, ready for `parse_args`.
+pub fn user_args() -> [str] {
+    let raw = process.argv()
+    var out: [str] = []
+    for i in 1..raw.len() { out.push(raw[i]) }
+    return out
+}
+
+/// Print `msg` to stderr and abort with exit status 1.
+pub fn fail(msg: str) {
+    io.stderr.write("error: {msg}\n")
+    process.exit(1)
+}
+
+/// Echo the captured stdout/stderr of a finished command.
+pub fn echo_output(out: Output) {
+    if out.stdout != "" { print(out.stdout.trim_end()) }
+    if out.stderr != "" { io.stderr.write(out.stderr) }
+}
+
+/// Run `command`, echo its output and abort when the status is non-zero.
+pub fn run_step(command: Cmd, label: str) -> Output {
+    let out = command.run_raw()
+    echo_output(out)
+    if out.status != 0 { fail("{label} failed with status {out.status}") }
+    return out
+}
+
+/// Path of a built executable, with the platform suffix applied.
+pub fn executable_path(base: str) -> str {
+    if env.os() == "windows" { return base + ".exe" }
+    return base
+}

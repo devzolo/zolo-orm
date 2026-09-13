@@ -1,0 +1,73 @@
+#!/usr/bin/env zolo
+//! Package validation: type-check the library, run every example, run the
+//! integration tests and assert each compile-fail contract under `tests/`.
+//!
+//! Usage: `zolo run scripts/test.zolo [--zolo <cli>]`
+
+use std::path
+use std::regex
+use common::{package_root, user_args, fail, run_step}
+
+@cli(name: "test")
+struct Args {
+    @arg(long, default: "zolo", help: "Zolo CLI to invoke")
+    zolo: str,
+}
+
+/// A source that must fail to compile, plus the Lua patterns of which at
+/// least one must appear in the diagnostics.
+struct CompileFail {
+    file: str,
+    patterns: [str],
+}
+
+let args = Args.parse_args(user_args())
+let zolo = args.zolo
+let root = package_root()
+let examples = path.join(root, "examples")
+let tests = path.join(root, "tests")
+
+run_step(sh"{zolo} check src/lib.zolo".cwd(root), "check src/lib.zolo")
+
+run_step(sh"{zolo} install".cwd(examples), "install examples")
+let runnable = [
+    "basic", "integration", "dx", "dx_imports",
+    "expressions", "hygiene", "relations", "query_plan",
+]
+for example in runnable {
+    run_step(sh"{zolo} run {example}.zolo --no-cache".cwd(examples), "run {example}.zolo")
+}
+run_step(sh"{zolo} test integration.zolo".cwd(examples), "test integration.zolo")
+
+run_step(sh"{zolo} install".cwd(tests), "install tests")
+let cases = [
+    CompileFail { file: "wrong_filter_type.zolo", patterns: ["TE111"] },
+    CompileFail { file: "unknown_field.zolo", patterns: ["TE104"] },
+    CompileFail { file: "missing_key.zolo", patterns: ["declare exactly one"] },
+    CompileFail { file: "optional_key.zolo", patterns: ["primary key cannot be optional"] },
+    CompileFail { file: "unsupported_field.zolo", patterns: ["unsupported field type"] },
+    CompileFail { file: "duplicate_column.zolo", patterns: ["duplicate column"] },
+    CompileFail { file: "duplicate_column_case.zolo", patterns: ["duplicate column"] },
+    CompileFail { file: "invalid_identifier.zolo", patterns: ["identifiers must contain"] },
+    CompileFail { file: "identifier_too_long.zolo", patterns: ["identifiers must not exceed 1024"] },
+    CompileFail { file: "wrong_create_type.zolo", patterns: ["TE111"] },
+    CompileFail { file: "wrong_patch_type.zolo", patterns: ["TE111"] },
+    CompileFail { file: "wrong_lambda_type.zolo", patterns: ["type", "incompatible", "compare"] },
+    CompileFail { file: "unknown_lambda_field.zolo", patterns: ["missing"] },
+    CompileFail { file: "unsupported_lambda.zolo", patterns: ["capture", "evaluat", "unsupported"] },
+    CompileFail { file: "unknown_sql_column.zolo", patterns: ["missing"] },
+    CompileFail { file: "wrong_sql_parameter.zolo", patterns: ["SQL value expects.*int.*found.*str"] },
+    CompileFail { file: "invalid_generated_key.zolo", patterns: ["generated requires an integer primary key"] },
+    CompileFail { file: "query_method_collision.zolo", patterns: ["generated query method collision: where_id_not"] },
+]
+for case in cases {
+    let out = sh"{zolo} check {case.file}".cwd(tests).run_raw()
+    if out.status == 0 { fail("expected compilation failure: {case.file}") }
+    let diagnostics = out.stdout + out.stderr
+    var matched = false
+    for pattern in case.patterns {
+        if regex.test(pattern, diagnostics) { matched = true }
+    }
+    if !matched { fail("unexpected failure for {case.file}:\n{diagnostics}") }
+    print("PASS compile-fail: {case.file}")
+}

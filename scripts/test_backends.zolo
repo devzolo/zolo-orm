@@ -1,0 +1,39 @@
+#!/usr/bin/env zolo
+//! Backend parity: compile the example programs with the native (Cranelift)
+//! and LLVM backends and execute every binary.
+//!
+//! Usage: `zolo run scripts/test_backends.zolo [--zolo <cli>]`
+
+use std::fs
+use std::path
+use common::{package_root, user_args, run_step, executable_path}
+
+@cli(name: "test_backends")
+struct Args {
+    @arg(long, default: "zolo", help: "Zolo CLI to invoke")
+    zolo: str,
+}
+
+let args = Args.parse_args(user_args())
+let zolo = args.zolo
+let root = package_root()
+let examples = path.join(root, "examples")
+let output_root = path.join(root, "target", "backend-tests")
+fs.mkdir(output_root)
+
+run_step(sh"{zolo} install".cwd(examples), "install examples")
+
+let backends = ["native", "llvm"]
+let cases = ["integration", "dx", "dx_imports", "expressions", "hygiene", "relations"]
+for backend in backends {
+    for case in cases {
+        let output = path.join(output_root, "{case}-{backend}")
+        run_step(
+            sh"{zolo} build --emit {backend} {case}.zolo -o {output}".cwd(examples),
+            "build {case} ({backend})",
+        )
+        let executable = executable_path(output)
+        run_step(sh"{executable}".cwd(examples), "execute {case} ({backend})")
+        print("PASS backend: {case} ({backend})")
+    }
+}
