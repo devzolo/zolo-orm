@@ -1,0 +1,11 @@
+use std::database::Database
+use orm::Model
+
+@derive(Model)
+struct Person {
+  @model(primary_key: true, generated: true)
+  id: int,
+  name: str,
+}
+
+fn reject(db: Database) { Person::create(db, name: 42) }

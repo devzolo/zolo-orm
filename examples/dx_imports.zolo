@@ -1,0 +1,21 @@
+use std::database::Database
+use orm::OrmError
+use models::Product
+
+fn exercise_imports() -> Result<int, OrmError> {
+  let db = Database.open("sqlite://:memory:").map_err(|error| OrmError::Database(error))?
+  defer db.close()
+  Product::create_table(db)?
+  let value = Product::create(db, name: "Imported")?
+  let rows = Product::query().filter(|p| p.available && p.id == value.id).select(|p| p.name).all(db)?
+  assert(rows[0] == "Imported")
+  let key = value.id
+  let sql_rows = sql"SELECT name FROM inventory WHERE product_id = {key}".query(db).map_err(
+    |error| OrmError::Database(error),
+  )?
+  assert(sql_rows[0]["name"] == "Imported")
+  print("orm imported models: ok")
+  return Result::Ok(1)
+}
+
+exercise_imports().unwrap()

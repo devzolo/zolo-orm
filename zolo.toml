@@ -1,0 +1,7 @@
+[package]
+name = "orm"
+version = "0.1.0"
+description = "Compile-time models and typed SQL queries for Zolo"
+license = "MIT"
+authors = ["devzolo"]
+keywords = ["orm", "sql", "database", "model"]

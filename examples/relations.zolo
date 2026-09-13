@@ -1,0 +1,44 @@
+use std::database::Database
+use orm::{Model, OrmError}
+
+@derive(Model)
+struct Customer {
+  @model(primary_key: true)
+  id: int,
+  @model(unique: true)
+  code: str,
+}
+
+@derive(Model)
+struct Ticket {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(belongs_to: "Customer", references: "code")
+  customer_code: str?,
+  label: str,
+}
+
+fn exercise_relations() -> Result<int, OrmError> {
+  let db = Database.open("sqlite://:memory:").map_err(|error| OrmError::Database(error))?
+  defer db.close()
+  Customer::create_table(db)?
+  Ticket::create_table(db)?
+  let first = Customer::create(db, id: 1, code: "A'_%!")?
+  let second = Customer::create(db, id: 2, code: "B")?
+  Ticket::create(db, customer_code: first.code, label: "owned")?
+  Ticket::create(db, customer_code: nil, label: "unassigned")?
+  Ticket::create(db, label: "also unassigned")?
+  let grouped = Ticket::load_customer_code(db, [second, first, first])?
+  assert(grouped.len() == 3)
+  assert(grouped[0].parent.id == second.id)
+  assert(grouped[0].items.len() == 0)
+  assert(grouped[1].parent.id == first.id)
+  assert(grouped[1].items.len() == 1)
+  assert(grouped[1].items[0].label == "owned")
+  assert(grouped[2].items.len() == 1)
+  assert(Ticket::query().where_customer_code(nil).count(db)? == 2)
+  print("orm optional string relations: ok")
+  return Result::Ok(grouped.len())
+}
+
+exercise_relations().unwrap()

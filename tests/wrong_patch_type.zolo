@@ -1,0 +1,10 @@
+use orm::Model
+
+@derive(Model)
+struct Person {
+  @model(primary_key: true)
+  id: int,
+  name: str,
+}
+
+let patch = Person::changes().set_name(42)

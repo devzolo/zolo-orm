@@ -1,0 +1,37 @@
+use std::database::Database
+use std::os
+use orm::{Model}
+
+@derive(Model)
+struct Sample {
+  @model(primary_key: true)
+  id: int,
+  label: str,
+  enabled: bool,
+}
+
+let db = Database.open("sqlite://:memory:").unwrap()
+defer db.close()
+Sample::create_table(db).unwrap()
+let items: [Sample] = []
+for id in 0..2000 { items.push(Sample.new(id, "sample", true)) }
+
+// Both paths use one transaction; fixture generation is outside the timing.
+// os.clock is the common monotonic clock across VM, native and LLVM.
+var started = os.clock()
+let single = db.transaction(
+  |tx| -> Result<int, Any> {
+    var affected = 0
+    for item in items { affected = affected + item.insert(tx)? }
+    return Result::Ok(affected)
+  },
+).unwrap()
+assert(single.unwrap() == 2000)
+let row_ms = (os.clock() - started) * 1000.0
+Sample::delete_all(db).unwrap()
+started = os.clock()
+assert(Sample::insert_many(db, items, batch_size: 128).unwrap() == 2000)
+let batch_ms = (os.clock() - started) * 1000.0
+assert(Sample::query().count(db).unwrap() == 2000)
+print("rows=2000 single_calls=2000 batch_calls=16")
+print("single_ms={row_ms} batch_ms={batch_ms}")

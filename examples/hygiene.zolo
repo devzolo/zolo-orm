@@ -1,0 +1,59 @@
+use std::database::Database
+use orm::Model
+
+fn default_label() -> str { return "from function" }
+
+@derive(Model)
+struct Collision {
+  @model(primary_key: true, generated: true)
+  id: int,
+  db: str,
+  params: str,
+  slots: str,
+  rows: str,
+  __orm_bindings: str,
+  default_label: str,
+  bind_value: str,
+  Statement: str,
+  CollisionSchema: str,
+  CollisionSchema_: str,
+  Collision: str,
+  Result: str,
+  OrmError: str,
+  label: str = default_label(),
+}
+
+let db = Database.open("sqlite://:memory:").unwrap()
+defer db.close()
+Collision::create_table(db).unwrap()
+let value = Collision::create(
+  db,
+  db: "db field",
+  params: "params field",
+  slots: "slots field",
+  rows: "rows field",
+  __orm_bindings: "bindings field",
+  default_label: "field shadows function",
+  bind_value: "field shadows binder",
+  Statement: "field shadows statement type",
+  CollisionSchema: "field shadows schema name",
+  CollisionSchema_: "field shadows first schema fallback",
+  Collision: "field shadows model name",
+  Result: "field shadows result type",
+  OrmError: "field shadows error type",
+).unwrap()
+assert(value.db == "db field")
+assert(value.params == "params field")
+assert(value.slots == "slots field")
+assert(value.rows == "rows field")
+assert(value.__orm_bindings == "bindings field")
+assert(value.default_label == "field shadows function")
+assert(value.bind_value == "field shadows binder")
+assert(value.Statement == "field shadows statement type")
+assert(value.CollisionSchema == "field shadows schema name")
+assert(value.CollisionSchema_ == "field shadows first schema fallback")
+assert(value.Collision == "field shadows model name")
+assert(value.Result == "field shadows result type")
+assert(value.OrmError == "field shadows error type")
+assert(value.label == "from function")
+print("orm hygiene: ok")

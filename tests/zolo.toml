@@ -1,0 +1,6 @@
+[project]
+name = "zolo-orm-contracts"
+version = "0.1.0"
+
+[dependencies]
+orm = { path = ".." }

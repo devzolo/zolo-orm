@@ -1,0 +1,11 @@
+use orm::Model
+
+@derive(Model)
+@model(table: "people")
+struct Person {
+  @model(primary_key: true)
+  id: int,
+  name: str,
+}
+
+let query = sql"SELECT missing FROM people"

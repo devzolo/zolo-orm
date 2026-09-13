@@ -1,0 +1,33 @@
+use std::database::Database
+use orm::{Model, OrmError}
+
+@derive(Model)
+@model(table: "users")
+struct User {
+  @model(primary_key: true, generated: true)
+  id: int,
+  name: str,
+  @model(unique: true)
+  email: str,
+  active: bool = true,
+  note: str?,
+}
+
+fn example(db: Database) -> Result<int, OrmError> {
+  User::create_table(db)?
+  let ana = User::create(db, name: "Ana", email: "ana@example.com")?
+  User::changes().set_note("Created with named arguments").apply(db, ana.id)?
+  let query = User::query().filter(|user| user.active && user.name.starts_with("A")).order_by_name().select(
+    |user| (user.id, user.name),
+  )
+  print(query.statement().text)
+  let users = query.all(db)?
+  print(users[0][1])
+  assert(users[0][0] == ana.id)
+  print("orm basic: ok")
+  return Result::Ok(users.len())
+}
+
+let db = Database.open("sqlite://:memory:").unwrap()
+defer db.close()
+example(db).unwrap()

@@ -1,0 +1,9 @@
+use orm::{Model}
+
+@derive(Model)
+struct User {
+  @model(primary_key: true)
+  id: int,
+  @model(column: "id")
+  name: str,
+}

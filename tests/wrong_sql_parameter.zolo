@@ -1,0 +1,11 @@
+use orm::Model
+
+@derive(Model)
+@model(table: "people")
+struct Person {
+  @model(primary_key: true)
+  id: int,
+}
+
+let key = "wrong"
+let query = sql"SELECT id FROM people WHERE id = {key}"

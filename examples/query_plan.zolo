@@ -1,0 +1,20 @@
+use orm::{Model}
+
+@derive(Model)
+struct Article {
+  @model(primary_key: true)
+  id: int,
+  title: str,
+  published: bool,
+}
+
+let base = Article::query()
+let query = base.where_published(true).where_id_in([2, 4]).order_by_id().limit(10)
+let statement = query.statement()
+assert(base.statement().params.len() == 0)
+assert(statement.params.len() == 3)
+assert(statement.params[1] == 2)
+print(statement.text)
+let value = Article::from_row(#{id: 2, title: "Zolo", published: true}).unwrap()
+assert(value.title == "Zolo")
+print("orm query plan: ok")

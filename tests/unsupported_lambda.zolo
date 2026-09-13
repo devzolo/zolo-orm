@@ -1,0 +1,12 @@
+use orm::Model
+
+@derive(Model)
+struct Person {
+  @model(primary_key: true)
+  id: int,
+  name: str,
+}
+
+fn external() -> str { return "Ana" }
+
+let query = Person::query().filter(|p| p.name == external())

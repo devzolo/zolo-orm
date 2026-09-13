@@ -1,0 +1,8 @@
+version = 2
+
+[[package]]
+name = "orm"
+version = "0.1.0"
+source = "path+.."
+content = "blake3:f66cacf1df19200df285acb8e2bfa95ea7d8cb480f4241c3a59946f9acb0703c"
+dependencies = []

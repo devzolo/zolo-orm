@@ -1,0 +1,152 @@
+use std::database::Database
+use orm::{Model, OrmError, transaction}
+
+fn default_label() -> str { return "Guest \"account\"" }
+
+@derive(Model)
+@model(table: "profiles")
+struct Profile {
+  @model(primary_key: true, generated: true, column: "profile_id")
+  id: int,
+  @model(unique: true)
+  email: str,
+  label: str = default_label(),
+  active: bool = true,
+  score: float = 1.25,
+  note: str? = "initial",
+}
+
+@derive(Model)
+@model(table: "messages")
+struct Message {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(belongs_to: "Profile")
+  profile_id: int,
+  text: str,
+}
+
+@allow(max_function_length)
+fn exercise_dx() -> Result<int, OrmError> {
+  let db = Database.open("sqlite://:memory:").map_err(|error| OrmError::Database(error))?
+  defer db.close()
+  Profile::create_table(db)?
+  Message::create_table(db)?
+  let first = Profile::create(db, email: "ana@example.com")?
+  assert(first.id > 0, "dx: first.id > 0")
+  assert(first.active, "dx: first.active")
+  assert(first.label == default_label(), "dx: first.label == default_label()")
+  assert(first.score ~= 1.25, "dx: first.score ~= 1.25")
+  assert(first.note == "initial", "dx: first.note == \"initial\"")
+  let second = Profile::create(db, email: "bia@example.com", label: "Bia", active: false, note: nil)?
+  assert(second.id != first.id, "dx: second.id != first.id")
+  assert(second.label == "Bia", "dx: second.label == \"Bia\"")
+  assert(!second.active, "dx: !second.active")
+  assert(second.note == nil, "dx: second.note == nil")
+
+  let base = Profile::changes().set_label("Updated")
+  let patch = base.set_note(nil).set_label("Ana")
+  assert(patch.apply(db, first.id)? == 1, "dx: patch.apply(db, first.id)? == 1")
+  assert(
+    Profile::changes().apply(db, first.id)? == 0,
+    "dx: Profile::changes().apply(db, first.id)? == 0",
+  )
+  let changed = Profile::find(db, first.id)? ?? panic("missing profile")
+  assert(changed.label == "Ana", "dx: changed.label == \"Ana\"")
+  assert(changed.note == nil, "dx: changed.note == nil")
+  assert(changed.email == first.email, "dx: changed.email == first.email")
+  assert(base.apply(db, second.id)? == 1, "dx: base.apply(db, second.id)? == 1")
+  assert(
+    (Profile::find(db, second.id)? ?? panic("missing profile")).label == "Updated",
+    "dx: (Profile::find(db, second.id)? ?? panic(\"missing profile\")).label == \"Updated\"",
+  )
+
+  let committed = transaction(db, |tx| Profile::create(tx, email: "committed@example.com"))?
+  assert(Profile::find(db, committed.id)? != nil, "dx: Profile::find(db, committed.id)? != nil")
+  let failed = transaction(
+    db,
+    |tx| -> Result<int, OrmError> {
+      Profile::create(tx, email: "rolled-back@example.com")?
+      return Result::Err(OrmError::UnsafeMutation("abort application transaction"))
+    },
+  )
+  assert(failed.is_err(), "dx: failed.is_err()")
+  assert(
+    Profile::query().where_email("rolled-back@example.com").count(db)? == 0,
+    "dx: Profile::query().where_email(\"rolled-back@example.com\").count(db)? == 0",
+  )
+  assert(Profile::query().count(db)? == 3, "dx: Profile::query().count(db)? == 3")
+  let saved = Profile::create(db, email: "literal@example.com", label: "A%_!literal", note: nil)?
+  let prefix = "A%_!"
+  let matching = Profile::query().filter(|p| p.active && p.label.starts_with(prefix))
+  assert(matching.count(db)? == 1, "dx: matching.count(db)? == 1")
+  assert(
+    (matching.first(db)? ?? panic("missing literal match")).id == saved.id,
+    "dx: (matching.first(db)? ?? panic(\"missing literal match\")).id == saved.id",
+  )
+  let selected = Profile::query().filter(
+    |p| p.active && (p.label == "Ana" || p.label.starts_with(prefix)),
+  ).order_by_id().select(|p| (p.id, p.label))
+  assert(
+    !selected.statement().text.contains("email"),
+    "dx: !selected.statement().text.contains(\"email\")",
+  )
+  let rows = selected.all(db)?
+  assert(rows.len() == 2, "dx: rows.len() == 2")
+  assert(rows[0][0] == first.id, "dx: rows[0][0] == first.id")
+  assert(rows[0][1] == "Ana", "dx: rows[0][1] == \"Ana\"")
+  assert(rows[1][0] == saved.id, "dx: rows[1][0] == saved.id")
+  let labels = Profile::query().where_id(first.id).select(|p| p.label).all(db)?
+  assert(labels[0] == "Ana", "dx: labels[0] == \"Ana\"")
+  assert(
+    Profile::query().filter(|p| p.note == nil).count(db)? == 3,
+    "dx: Profile::query().filter(|p| p.note == nil).count(db)? == 3",
+  )
+  assert(
+    Profile::query().filter(|p| !p.active).count(db)? == 1,
+    "dx: Profile::query().filter(|p| !p.active).count(db)? == 1",
+  )
+
+  Message::create(db, profile_id: first.id, text: "one")?
+  Message::create(db, profile_id: first.id, text: "two")?
+  Message::create(db, profile_id: saved.id, text: "three")?
+  let related = Message::load_profile_id(db, [first, second, first, saved])?
+  assert(related.len() == 4, "dx: related.len() == 4")
+  assert(related[0].items.len() == 2, "dx: related[0].items.len() == 2")
+  assert(related[1].items.len() == 0, "dx: related[1].items.len() == 0")
+  assert(related[2].items.len() == 2, "dx: related[2].items.len() == 2")
+  assert(related[3].items[0].text == "three", "dx: related[3].items[0].text == \"three\"")
+  let duplicates: [Profile] = []
+  for _index in 0..1000 { duplicates.push(first) }
+  let repeated = Message::load_profile_id(db, duplicates)?
+  assert(repeated.len() == 1000, "dx: repeated.len() == 1000")
+  assert(repeated[999].items.len() == 2, "dx: repeated[999].items.len() == 2")
+  let distinct: [Profile] = []
+  for index in 0..1801 {
+    distinct.push(
+      Profile {
+        id: 10000 + index,
+        email: "placeholder",
+        label: "",
+        active: false,
+        score: 0.0,
+        note: nil,
+      },
+    )
+  }
+  distinct.push(saved)
+  let chunked = Message::load_profile_id(db, distinct)?
+  assert(chunked.len() == 1802, "dx: chunked.len() == 1802")
+  assert(chunked[0].items.len() == 0, "dx: chunked[0].items.len() == 0")
+  assert(chunked[1801].items.len() == 1, "dx: chunked[1801].items.len() == 1")
+  db.close()
+  // A closed connection proves empty preload does not issue a query.
+  assert(
+    Message::load_profile_id(db, []).unwrap().len() == 0,
+    "dx: Message::load_profile_id(db, []).unwrap().len() == 0",
+  )
+  print("orm dx: ok")
+  return Result::Ok(4)
+}
+
+exercise_dx().unwrap()

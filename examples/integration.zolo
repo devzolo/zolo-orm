@@ -1,0 +1,96 @@
+use std::database::Database
+use orm::{Model}
+
+@derive(Model)
+@model(table: "accounts")
+struct Account {
+  @model(primary_key: true, column: "account_id")
+  id: int,
+  @model(unique: true)
+  email: str,
+  score: float,
+  active: bool,
+  note: str?,
+}
+
+@derive(Model)
+@model(table: "tasks")
+struct Todo {
+  @model(primary_key: true)
+  id: int,
+  account_id: int,
+  title: str,
+}
+
+@allow(max_function_length)
+fn exercise() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  Account::create_table(db).unwrap()
+  Todo::create_table(db).unwrap()
+  let records = [
+    Account.new(1, "a@example.com", 1.5, true, nil),
+    Account.new(2, "b@example.com", 2.5, false, "note"),
+    Account.new(3, "c@example.com", 3.5, true, nil),
+  ]
+  assert(Account::insert_many(db, records, batch_size: 2).unwrap() == 3)
+  assert(Account::insert_many(db, []).unwrap() == 0)
+  let base = Account::query()
+  let active = base.where_active(true)
+  let inactive = base.where_active(false)
+  assert(base.count(db).unwrap() == 3)
+  assert(active.count(db).unwrap() == 2)
+  assert(inactive.count(db).unwrap() == 1)
+  assert(base.where_note(nil).count(db).unwrap() == 2)
+  assert(base.where_note_not(nil).count(db).unwrap() == 1)
+  assert(base.where_id_in([]).all(db).unwrap().len() == 0)
+  assert(base.where_id_in([1, 3]).all(db).unwrap().len() == 2)
+  assert(base.where_score_gt(2.0).where_score_lt(3.0).all(db).unwrap()[0].id == 2)
+  let page = base.order_by_id(descending: true).limit(1).offset(1).all(db).unwrap()
+  assert(page[0].id == 2)
+  assert(page[0].score ~= 2.5)
+  assert(!page[0].active)
+  assert(page[0].note == "note")
+  assert(base.limit(0).first(db).unwrap() == nil)
+  assert(Account::find(db, 404).unwrap() == nil)
+  let selected_id = 2
+  let raw = Account::from_sql(
+    db,
+    sql"SELECT account_id, email, score, active, note FROM accounts WHERE account_id = {selected_id}",
+  ).unwrap()
+  assert(raw[0].id == 2)
+  let evil = "x' OR 1=1 --"
+  assert(base.where_email(evil).count(db).unwrap() == 0)
+  let injection = base.where_email(evil).statement()
+  assert(!injection.text.contains(evil))
+  assert(injection.params[0] == evil)
+  assert(base.delete(db).is_err())
+  assert(base.where_id(1).limit(1).delete(db).is_err())
+  Account.new(2, "updated@example.com", 7.5, true, nil).update(db).unwrap()
+  let updated = Account::find(db, 2).unwrap() ?? panic("missing account")
+  assert(updated.email == "updated@example.com")
+  assert(updated.note == nil)
+  // Failure in the SECOND chunk must undo the FIRST chunk as well.
+  let duplicate = [
+    Account.new(4, "d@example.com", 0.5, false, nil),
+    Account.new(5, "a@example.com", 0.5, false, nil),
+  ]
+  assert(Account::insert_many(db, duplicate, batch_size: 1).is_err())
+  assert(base.count(db).unwrap() == 3)
+  assert(Account::find(db, 4).unwrap() == nil)
+  // Explicit batched relation loading: two queries, no implicit N+1.
+  Todo::insert_many(db, [Todo.new(1, 1, "one"), Todo.new(2, 3, "two")]).unwrap()
+  let accounts = base.where_active(true).all(db).unwrap()
+  let tasks = Todo::query().where_account_id_in(accounts.map(|account| account.id)).all(db).unwrap()
+  assert(tasks.len() == 2)
+  assert(Account::from_row(#{account_id: "invalid"}).is_err())
+  assert(Account::from_row(#{account_id: 1, email: "x", score: 1.5, active: 9}).is_err())
+  assert(base.where_id(3).delete(db).unwrap() == 1)
+  assert(Account::delete_all(db).unwrap() == 2)
+  print("orm integration: ok")
+}
+
+@test
+fn orm_integration() { exercise() }
+
+exercise()

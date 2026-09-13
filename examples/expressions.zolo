@@ -1,0 +1,86 @@
+use orm::Model
+use std::database::Database
+
+@derive(Model)
+@model(table: "people")
+struct Person {
+  @model(primary_key: true, column: "person_id")
+  id: int,
+  name: str,
+  active: bool,
+  note: str?,
+}
+
+let prefix = "A%_!"
+let base = Person::query()
+let a = base.filter(|p| p.active && (p.name.starts_with(prefix) || p.id >= 10))
+let b = base.filter(|p| !p.active && p.note == nil)
+let stmt = a.statement()
+assert(stmt.params.len() == 3)
+assert(stmt.params[0] == true)
+assert(stmt.params[1] == "A!%!_!!%")
+assert(stmt.params[2] == 10)
+assert(base.statement().params.len() == 0)
+assert(b.statement().params.len() == 1)
+let projection = a.select(|p| (p.id, p.name))
+let sql_text = projection.statement().text
+assert(sql_text.starts_with("SELECT \"person_id\", \"name\" FROM"))
+let db = Database.open("sqlite://:memory:").unwrap()
+defer db.close()
+Person::create_table(db).unwrap()
+Person::insert_many(
+  db,
+  [
+    Person.new(1, "A%_!literal", true, nil),
+    Person.new(2, "ordinary", false, nil),
+    Person.new(10, "ten", true, "note"),
+  ],
+).unwrap()
+let rows = projection.all(db).unwrap()
+assert(rows.len() == 2)
+assert(rows[0][0] == 1)
+assert(rows[0][1] == "A%_!literal")
+assert(rows[1][0] == 10)
+let names = b.select(|p| p.name).all(db).unwrap()
+assert(names[0] == "ordinary")
+let single = projection.first(db).unwrap() ?? panic("missing projection")
+assert(single[0] == 1)
+assert(projection.limit(0).first(db).unwrap() == nil)
+let optional_rows = Person::query().order_by_id().select(|p| (p.id, p.note)).all(db).unwrap()
+assert(optional_rows.len() == 3)
+assert(optional_rows[0][1] == nil)
+assert(optional_rows[1][1] == nil)
+assert(optional_rows[2][1] == "note")
+// Current VM arrays cannot preserve scalar nil slots. Reject instead of dropping rows.
+let scalar_nulls = Person::query().order_by_id().select(|p| p.note).all(db)
+match scalar_nulls {
+  .Err(error) => match error {
+    .Unsupported(message) => assert(message.contains("scalar NULL")),
+    _ => panic("expected scalar NULL capability error"),
+  },
+  _ => panic("scalar NULL rows must not be silently dropped"),
+}
+// Builder limits are recoverable through every execution path.
+let excessive_keys: [int] = []
+for key in 0..16385 { excessive_keys.push(key) }
+let excessive = Person::query().where_id_in(excessive_keys)
+assert(excessive.try_statement().is_err())
+assert(excessive.all(db).is_err())
+assert(excessive.count(db).is_err())
+assert(excessive.delete(db).is_err())
+assert(excessive.select(|p| p.name).all(db).is_err())
+assert(Person::query().count(db).unwrap() == 3)
+match Person::from_row(#{person_id: "wrong"}) {
+  .Err(error) => match error {
+    .FieldDecode(details) => {
+      assert(details.model == "Person")
+      assert(details.field == "id")
+      assert(details.expected == "int")
+    },
+    _ => panic("missing structured field error"),
+  },
+  _ => panic("invalid row was accepted"),
+}
+print(stmt.text)
+print(sql_text)
+print("orm expressions: ok")

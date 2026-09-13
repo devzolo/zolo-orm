@@ -1,0 +1,9 @@
+use orm::Model
+
+@derive(Model)
+struct Person {
+  @model(primary_key: true)
+  id: int,
+}
+
+let query = Person::query().filter(|p| p.missing == 1)

@@ -1,0 +1,12 @@
+use orm::Model
+
+fn default_availability() -> bool { return true }
+
+@derive(Model)
+@model(table: "inventory")
+pub struct Product {
+  @model(primary_key: true, generated: true, column: "product_id")
+  pub id: int,
+  pub name: str,
+  pub available: bool = default_availability(),
+}
