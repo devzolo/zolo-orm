@@ -1,0 +1,52 @@
+//! Insert values create a row; the explicit patch alone changes an existing row.
+//! Run from examples/: zolo run upsert.zolo --no-cache
+use std::database::Database
+use orm::{Model, OrmError}
+
+@derive(Model)
+@model(table: "contacts")
+struct Contact {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(unique: true)
+  email: str,
+  name: str,
+  note: str? = "First signup",
+}
+
+fn example(db: Database) -> Result<int, OrmError> {
+  Contact::create_table(db)?
+  let input = ContactInsert { email: "ana@example.com", name: "Ana" }
+
+  // No conflict: only the insert input is used, even with a nonempty patch.
+  let patch = Contact::changes().set_name("Ana Maria")
+  let inserted = Contact::upsert_by_email(db, input, patch)? ?? panic("expected insert")
+  assert(inserted.name == "Ana")
+  print("Inserted: {inserted.name}")
+
+  // Same key: the patch changes the name and leaves the stored note intact.
+  let updated = Contact::upsert_by_email(db, input, patch)? ?? panic("expected update")
+  assert(updated.id == inserted.id)
+  assert(updated.note == "First signup")
+  print("Updated: {updated.name}")
+
+  // An empty patch does not read the existing row or issue an artificial update.
+  let skipped = Contact::upsert_by_email(db, input, Contact::changes())?
+  assert(skipped == nil)
+  print("Conflict with empty patch: skipped")
+
+  // A nil setter is an explicit SQL NULL, not an omitted field.
+  let cleared = Contact::upsert_by_email(
+    db, input, Contact::changes().set_note(nil),
+  )? ?? panic("expected update")
+  assert(cleared.name == "Ana Maria")
+  assert(cleared.note == nil)
+  print("Note: cleared")
+  return Result::Ok(Contact::query().count(db)?)
+}
+
+let db = Database.open("sqlite://:memory:").unwrap()
+defer db.close()
+let count = example(db).unwrap()
+assert(count == 1)
+print("Rows: {count}")

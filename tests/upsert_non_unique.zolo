@@ -1,0 +1,13 @@
+use orm::Model
+
+@derive(Model)
+struct Item {
+  @model(primary_key: true)
+  id: int,
+  name: str,
+}
+
+use std::database::Database
+
+let db = Database.open("sqlite://:memory:").unwrap()
+Item::upsert_by_name(db, ItemInsert { id: 1, name: "x" }, Item::changes())

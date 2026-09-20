@@ -1,0 +1,54 @@
+//! Save related rows atomically, load children explicitly and enforce a cascade.
+//! Run from examples/: zolo run relationships.zolo --no-cache
+use std::database::Database
+use orm::{Model, OrmError, transaction}
+
+@derive(Model)
+@model(table: "authors")
+struct Author {
+  @model(primary_key: true, generated: true)
+  id: int,
+  name: str,
+}
+
+@derive(Model)
+@model(table: "articles")
+struct Article {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(belongs_to: "Author", foreign_key: true, on_delete: "cascade", index: true)
+  author_id: int,
+  title: str,
+}
+
+fn publish(db: Database) -> Result<Author, OrmError> {
+  let author = Author::create(db, name: "Ana")?
+  Article::create(db, author_id: author.id, title: "First post")?
+  Article::create(db, author_id: author.id, title: "Second post")?
+  return Result::Ok(author)
+}
+
+fn example(db: Database) -> Result<int, OrmError> {
+  // Parents first when creating tables directly.
+  Author::create_table(db)?
+  Article::create_table(db)?
+  let author = transaction(db, |tx| publish(tx))?
+
+  // One explicit loading operation; reading .items performs no further query.
+  let authors = Author::query().order_by_id().all(db)?
+  let grouped = Article::load_author_id(db, authors)?
+  assert(grouped.len() == 1)
+  assert(grouped[0].items.len() == 2)
+  print("{grouped[0].parent.name}: {grouped[0].items.len()} articles")
+
+  // The database applies the declared cascade.
+  author.delete(db)?
+  let remaining = Article::query().count(db)?
+  assert(remaining == 0)
+  print("Articles after deleting author: {remaining}")
+  return Result::Ok(remaining)
+}
+
+let db = Database.open("sqlite://:memory:").unwrap()
+defer db.close()
+example(db).unwrap()

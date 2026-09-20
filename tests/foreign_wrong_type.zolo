@@ -1,0 +1,16 @@
+use orm::Model
+
+@derive(Model)
+struct Parent {
+  @model(primary_key: true)
+  id: int,
+  code: str,
+}
+
+@derive(Model)
+struct Item {
+  @model(primary_key: true)
+  id: int,
+  @model(belongs_to: "Parent", foreign_key: true)
+  owner_id: str,
+}

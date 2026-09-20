@@ -1,0 +1,162 @@
+//! Foreign keys use the referenced model's actual table and mapped column names.
+//! Start with relationships.zolo for a small parent/child transaction and cascade.
+use std::database::{Database, DbErrorKind}
+use orm::{Model, OrmError}
+use schema_parents::Organization as Org
+
+@derive(Model)
+@model(table: "memberships")
+struct Membership {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(belongs_to: "Org", references: "code", foreign_key: true, on_delete: "set_null", on_update: "cascade", column: "organization_code")
+  org_code: str?,
+  label: str,
+}
+
+@derive(Model)
+struct Invoice {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(belongs_to: "Org", foreign_key: true, on_delete: "cascade")
+  org_id: int,
+}
+
+@derive(Model)
+struct ExternalReference {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(belongs_to: "Org", references: "external_key", foreign_key: true, on_delete: "cascade")
+  org_key: str,
+}
+
+@derive(Model)
+struct Restriction {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(belongs_to: "Org", foreign_key: true)
+  org_id: int,
+}
+
+@derive(Model)
+struct DefaultMembership {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(belongs_to: "Org", foreign_key: true, on_delete: "set_default", default_sql: "1")
+  org_id: int = 1,
+}
+
+@derive(Model)
+struct NullableParent {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(unique: true)
+  code: str?,
+}
+
+@derive(Model)
+struct NullableChild {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(belongs_to: "NullableParent", references: "code", foreign_key: true, on_delete: "set_null")
+  code: str?,
+}
+
+fn expect_foreign_key<T>(result: Result<T, OrmError>) {
+  match result {
+    .Err(error) => match error {
+      .Database(cause) => assert(cause.is(DbErrorKind::ForeignKeyViolation)),
+      _ => panic("expected a typed foreign-key failure"),
+    },
+    _ => panic("a foreign-key violation must fail"),
+  }
+}
+
+@allow(max_function_length)
+fn exercise_foreign_keys() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  assert(db.query("PRAGMA foreign_keys", []).unwrap()[0]["foreign_keys"] == 1)
+  Org::create_table(db).unwrap()
+  Membership::create_table(db).unwrap()
+  Invoice::create_table(db).unwrap()
+  ExternalReference::create_table(db).unwrap()
+  Restriction::create_table(db).unwrap()
+  assert(
+    Membership::schema_sql().contains(
+      "REFERENCES \"organizations\" (\"org_code\") ON DELETE SET NULL ON UPDATE CASCADE",
+    ),
+  )
+  assert(Invoice::schema_sql().contains("REFERENCES \"organizations\" (\"org_key\")"))
+  assert(
+    ExternalReference::schema_sql().contains("REFERENCES \"organizations\" (\"external_ref\")"),
+  )
+  assert(Restriction::schema_sql().contains("ON DELETE NO ACTION ON UPDATE NO ACTION"))
+  let owner = Org::create(db, code: "ORG", external_key: "external").unwrap()
+  let membership = Membership::create(db, org_code: owner.code, label: "owned").unwrap()
+  Membership::create(db, label: "unassigned").unwrap()
+  Invoice::create(db, org_id: owner.id).unwrap()
+  ExternalReference::create(db, org_key: owner.external_key).unwrap()
+  let restriction = Restriction::create(db, org_id: owner.id).unwrap()
+  expect_foreign_key(Membership::create(db, org_code: "missing", label: "invalid"))
+  expect_foreign_key(Invoice::create(db, org_id: 999))
+  expect_foreign_key(owner.delete(db))
+  assert(Org::find_or_error(db, owner.id).unwrap().code == "ORG")
+  Org::changes().set_code("RENAMED").apply(db, owner.id).unwrap()
+  assert(Membership::find_or_error(db, membership.id).unwrap().org_code == "RENAMED")
+  let updated_owner = Org::find_or_error(db, owner.id).unwrap()
+  let related = Membership::load_org_code(db, [updated_owner]).unwrap()
+  assert(related[0].items.len() == 1)
+  assert(related[0].items[0].id == membership.id)
+  restriction.delete(db).unwrap()
+  owner.delete(db).unwrap()
+  assert(Invoice::query().count(db).unwrap() == 0)
+  assert(ExternalReference::query().count(db).unwrap() == 0)
+  assert(Membership::find_or_error(db, membership.id).unwrap().org_code == nil)
+  assert(Membership::query().count(db).unwrap() == 2)
+  let remaining = Membership::load_org_code(db, [updated_owner]).unwrap()
+  assert(remaining[0].items.len() == 0)
+}
+
+fn exercise_nullable_parent() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  NullableParent::create_table(db).unwrap()
+  NullableChild::create_table(db).unwrap()
+  let absent = NullableParent::create(db).unwrap()
+  let present = NullableParent::create(db, code: "parent").unwrap()
+  NullableChild::create(db, code: "parent").unwrap()
+  NullableChild::create(db).unwrap()
+  let related = NullableChild::load_code(db, [absent, present]).unwrap()
+  assert(related[0].items.len() == 0)
+  assert(related[1].items.len() == 1)
+  present.delete(db).unwrap()
+  assert(NullableChild::query().where_code(nil).count(db).unwrap() == 2)
+}
+
+fn exercise_database_default() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  Org::create_table(db).unwrap()
+  DefaultMembership::create_table(db).unwrap()
+  let fallback = Org::create(db, code: "DEFAULT", external_key: "default").unwrap()
+  let owner = Org::create(db, code: "ACTIVE", external_key: "active").unwrap()
+  assert(fallback.id == 1)
+  let membership = DefaultMembership::create(db, org_id: owner.id).unwrap()
+  owner.delete(db).unwrap()
+  assert(DefaultMembership::find_or_error(db, membership.id).unwrap().org_id == fallback.id)
+}
+
+@test
+fn database_default_action() { exercise_database_default() }
+
+@test
+fn foreign_keys() { exercise_foreign_keys() }
+
+@test
+fn nullable_parent_keys() { exercise_nullable_parent() }
+
+exercise_foreign_keys()
+exercise_nullable_parent()
+exercise_database_default()
+print("orm foreign keys: ok")

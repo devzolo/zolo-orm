@@ -1,0 +1,12 @@
+use orm::Model
+
+@derive(Model)
+@model(table: "organizations", unique_indexes: #{by_external_key: ["external_key"]})
+pub struct Organization {
+  @model(primary_key: true, generated: true, column: "org_key")
+  pub id: int,
+  @model(unique: true, column: "org_code")
+  pub code: str,
+  @model(column: "external_ref")
+  pub external_key: str,
+}

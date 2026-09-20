@@ -1,6 +1,6 @@
 use std::database::Database
 use orm::OrmError
-use models::Product
+use models::{Product, ProductInsert}
 
 fn exercise_imports() -> Result<int, OrmError> {
   let db = Database.open("sqlite://:memory:").map_err(|error| OrmError::Database(error))?
@@ -14,8 +14,19 @@ fn exercise_imports() -> Result<int, OrmError> {
     |error| OrmError::Database(error),
   )?
   assert(sql_rows[0]["name"] == "Imported")
+  let input = ProductInsert { id: value.id, name: "Insert defaults" }
+  assert(input.available)
+  let updated = Product::upsert_by_id(db, input, Product::changes().set_name("Patched import"))? ?? panic(
+    "expected imported upsert",
+  )
+  assert(updated.id == value.id)
+  assert(updated.name == "Patched import")
+  assert(updated.available)
   print("orm imported models: ok")
   return Result::Ok(1)
 }
+
+@test
+fn imported_model_upsert() { exercise_imports().unwrap() }
 
 exercise_imports().unwrap()

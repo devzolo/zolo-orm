@@ -18,6 +18,8 @@ struct Collision {
   CollisionSchema: str,
   CollisionSchema_: str,
   Collision: str,
+  CollisionInsert: str,
+  insert_statement: str,
   Result: str,
   OrmError: str,
   label: str = default_label(),
@@ -39,6 +41,8 @@ let value = Collision::create(
   CollisionSchema: "field shadows schema name",
   CollisionSchema_: "field shadows first schema fallback",
   Collision: "field shadows model name",
+  CollisionInsert: "field shadows generated insert type",
+  insert_statement: "field shadows statement method",
   Result: "field shadows result type",
   OrmError: "field shadows error type",
 ).unwrap()
@@ -56,4 +60,34 @@ assert(value.Collision == "field shadows model name")
 assert(value.Result == "field shadows result type")
 assert(value.OrmError == "field shadows error type")
 assert(value.label == "from function")
+assert(Collision::find_or_error(db, value.id).unwrap().OrmError == value.OrmError)
+assert(Collision::query().first_or_error(db).unwrap().Result == value.Result)
+assert(Collision::query().exists(db).unwrap())
+let insert = CollisionInsert_ {
+  id: value.id,
+  db: value.db,
+  params: value.params,
+  slots: value.slots,
+  rows: value.rows,
+  __orm_bindings: value.__orm_bindings,
+  default_label: value.default_label,
+  bind_value: value.bind_value,
+  Statement: value.Statement,
+  CollisionSchema: value.CollisionSchema,
+  CollisionSchema_: value.CollisionSchema_,
+  Collision: value.Collision,
+  CollisionInsert: value.CollisionInsert,
+  insert_statement: value.insert_statement,
+  Result: value.Result,
+  OrmError: value.OrmError,
+}
+assert(insert.label == "from function")
+let updated = Collision::upsert_by_id(db, insert, Collision::changes().set_label("updated")).unwrap() ?? panic(
+  "expected updated collision model",
+)
+assert(updated.label == "updated")
+assert(updated.CollisionInsert == "field shadows generated insert type")
+assert(updated.insert_statement == "field shadows statement method")
+assert(updated.Result == value.Result)
+assert(updated.OrmError == value.OrmError)
 print("orm hygiene: ok")

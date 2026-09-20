@@ -1,0 +1,9 @@
+use orm::Model
+
+@derive(Model)
+struct Item {
+  @model(primary_key: true)
+  id: int,
+  @model(unique: true)
+  id_statement: str,
+}

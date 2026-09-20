@@ -1,0 +1,8 @@
+use orm::Model
+
+@derive(Model)
+@model(indexes: #{id: ["id"]})
+struct Item {
+  @model(primary_key: true, index: true)
+  id: int,
+}

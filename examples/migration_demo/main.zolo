@@ -1,0 +1,19 @@
+//! Apply migrations before running this program; it deliberately creates no tables.
+use std::database::Database
+use orm::OrmError
+use models::{Note, NoteInsert}
+
+fn example(db: Database) -> Result<int, OrmError> {
+  // A fixed demo key makes repeated runs deterministic.
+  let input = NoteInsert { id: 1, title: "First note", body: "Created after migration" }
+  let saved = Note::upsert_by_id(db, input, Note::changes().set_body("Created after migration"))?
+    ?? panic("expected saved note")
+  print("{saved.title}: {saved.body}")
+  return Result::Ok(Note::query().count(db)?)
+}
+
+let db = Database.open("sqlite://tutorial.db").unwrap()
+defer db.close()
+let count = example(db).unwrap()
+assert(count == 1)
+print("Notes: {count}")

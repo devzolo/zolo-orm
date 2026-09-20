@@ -2,17 +2,39 @@
 
 This document describes how the package turns a struct into SQL, what the
 generated code owns, and where the boundaries with `std::database` and the
-compiler are. Read the [README](README.md) first for the user-facing API.
+compiler are. Start with the [README](README.md) and [user guides](docs/README.md) for the public API.
+
+## Responsibilities
+
+| Layer | Owns |
+| --- | --- |
+| Model declarations | Field types, defaults, keys, indexes and relation intent. |
+| zolo-orm | Typed helpers, immutable query plans, patches and row decoding. |
+| Compiler / language server | Derives, generated imports, query capture, reflection and editor analysis. |
+| zolo-sql | Structured SQL construction, parsing and dialect rendering. |
+| std::database / zolodb | Connections, bound execution, transactions and structured driver failures. |
+| zolo db | Schema snapshots, migration planning, history and drift checks. |
+
+The application owns connection lifetime and chooses transaction boundaries.
+Queries execute when an execution method is called; accessing a field never
+triggers a hidden query. Model metadata feeds query checking and migrations,
+so there is no separately maintained mapping schema.
+
+For observable contracts, start with [basic](examples/basic.zolo),
+[upsert](examples/upsert.zolo) and [relationships](examples/relationships.zolo).
+The larger schema/foreign-key examples retain edge-case regression coverage.
 
 ## Code generation
 
 `Model` is a compile-time derive. For each annotated struct it emits:
 
-- the `CREATE TABLE` DDL and the static column metadata,
+- the `CREATE TABLE`/`CREATE INDEX` DDL and the static column metadata,
 - a `<Model>Query` struct with the `where_*`, `order_by_*`, `filter`, `select`
   and execution methods,
-- `create`, `find`, `changes`, `insert_many`, `delete_all` and the instance
+- `create`, `find`, `find_or_error`, `changes`, `insert_many`, `delete_all` and the instance
   `insert`/`update`/`delete` methods,
+- a `<Model>Insert` input type and typed upsert/statement methods for each
+  declared primary/unique conflict target,
 - a row decoder that builds the struct from a driver row,
 - one `load_<field>` function per `belongs_to` relation.
 
@@ -37,13 +59,26 @@ to the zolo-sql AST builder.
 
 Generated methods validate column names and value types before anything
 reaches the builder. The low-level plan methods are public so that other
-libraries can build on them, but they accept raw SQL fragments and give none of
-the guarantees of the generated API.
+libraries can build on them. Their runtime column names and structured
+predicates still pass through the SQL builder, but lack the field-name and
+value-type checks of the generated API.
 
 Filter and select lambdas are not executed. The compiler captures the lambda,
 checks it against the model's schema metadata, and rewrites it into structured
 predicates or a column list plus a typed decoder. Unsupported expressions are
 rejected at that point.
+
+`first_or_error` delegates to `first`, so it preserves the query's ordering and
+offset, its zero-limit fast path, and its database/decoding failures. Only an
+absent row becomes `NotFound` with the source model name. `find_or_error`
+builds a primary-key predicate and uses the same required-read path.
+
+`count` and `exists` operate on matching records independently of ordering and
+pagination. The `exists` statement kind renders `SELECT 1 AS "orm_exists" FROM
+... WHERE ... LIMIT 1`. It ignores the model projection and tests whether the
+driver returned a row; it never invokes the model decoder. This keeps the work
+bounded to one match and allows an existence check even when an unrelated
+model field cannot be decoded.
 
 ## Statements and execution
 
@@ -69,14 +104,45 @@ with storing NULL on purpose. The row returned by `INSERT ... RETURNING` is
 decoded into the model.
 
 `ModelChanges` stores typed assignments. Setting a field to `nil` and not
-setting it are different states, so a patch can write NULL. An empty patch
-issues no SQL.
+setting it are different states, so a patch can write NULL. Applying an empty
+patch directly with `apply` issues no SQL.
 
 Decoders use complete struct literals, so a database NULL can never be replaced
 by the field's construction default. SQLite booleans are accepted as `bool` or
 as the integers 0 and 1; other numeric probes use Zolo's checked conversions.
 A decode failure carries the model, the field and the expected type, but not
 the rejected value.
+
+## Indexes, foreign keys and upsert
+
+Type-level `indexes` and `unique_indexes` are maps from a logical name to an
+ordered field list. Field-level `index` is shorthand for one such index. The
+derive validates names, duplicate fields and field existence before converting
+logical fields to quoted SQL columns. Schema statements are deterministic and
+shared by `schema_sql`, `schema_statements`, `create_table` and the compiler's
+`@sql_schema(ddl)` metadata. Migrations consume the same DDL.
+
+Foreign keys are opt-in on `belongs_to`. The generic compile-time
+`resolve_visible_type` lookup reads the consumer's visible type catalog,
+without changing the producer's executable lexical scope. The ORM reads the
+referenced model's raw decorators to resolve its canonical table, column and
+unique-key status. It validates the field types and referential actions before
+emitting REFERENCES. A loader alone retains its earlier behavior and produces
+no foreign-key DDL.
+
+Each upsert target is generated from a primary key, UNIQUE field or named
+unique index. `<Model>Insert` supplies insert values/defaults; generated keys
+are optional inputs. `<Model>Changes` supplies only explicit update assignments.
+The shared statement helper appends patch bindings after insert bindings and
+emits one parameterized ON CONFLICT statement with RETURNING. It never copies
+insert defaults into the UPDATE clause.
+
+An empty patch emits DO NOTHING and a conflict returns nil. No read/modify/write
+race, follow-up SELECT or synthetic UPDATE is needed. Constraints unrelated to
+the named target remain database errors, and the returned row always passes
+through the normal model decoder. Statement-inspection helpers use the exact
+same construction path as execution. Generated method and helper-name
+collisions are checked before publishing the API.
 
 ## Batches
 
@@ -90,15 +156,20 @@ backends, while the VM has its own bridge and rollback path.
 ## Relations
 
 `belongs_to` generates an explicit loader instead of a lazy property. The
-loader deduplicates the parent keys, fetches the children with `IN` queries of
-at most 900 keys, and groups them back in the original parent order. It does
-not add foreign-key DDL, does not wrap its reads in a transaction, and never
-runs when a field is accessed, which rules out hidden N+1 queries.
+loader deduplicates non-null parent keys, fetches the children with `IN` queries
+of at most 900 keys, and groups them back in the original parent order. A parent
+with a nil key receives an empty group. The loader does not add foreign-key DDL
+unless `foreign_key: true` is requested, does not wrap its reads in a transaction,
+and never runs when a field is accessed, which rules out hidden N+1 queries.
 
 ## Errors
 
 - `OrmError.Database` wraps the driver's `DbError`; SQL builder limits reached
-  during execution or `try_statement()` also surface here.
+  during execution or `try_statement()` also surface here. SQLite constraint
+  kinds such as `UniqueViolation` survive this wrapper and transactional
+  rollback; callers branch on `DbError.kind()` or `.is()` without parsing text.
+- `OrmError.NotFound` identifies the model when a required read has no row; it
+  never includes the requested key or filter values.
 - `OrmError.FieldDecode` and `OrmError.Decode` report rows that do not match the
   model.
 - `OrmError.UnsafeMutation` rejects deletes that are ambiguous: no filter, or a

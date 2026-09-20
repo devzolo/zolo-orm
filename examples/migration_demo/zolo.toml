@@ -1,0 +1,13 @@
+[project]
+name = "orm-migration-demo"
+version = "0.1.0"
+entry = "main.zolo"
+
+[database]
+schema = "models.zolo"
+migrations = "migrations"
+dialect = "sqlite"
+url_env = "DATABASE_URL"
+
+[dependencies]
+orm = { path = "../.." }

@@ -1,0 +1,11 @@
+use orm::Model
+
+@derive(Model)
+@model(unique_indexes: #{by_alias: ["alias"]})
+struct Item {
+  @model(primary_key: true)
+  id: int,
+  alias: str,
+  @model(unique: true)
+  index_by_alias: str,
+}

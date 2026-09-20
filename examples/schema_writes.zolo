@@ -1,0 +1,238 @@
+//! Indexes and atomic upserts share model metadata and explicit update patches.
+//! For a shorter introduction to insert inputs and patches, start with upsert.zolo.
+use std::database::{Database, DbErrorKind}
+use orm::{Model, OrmError}
+
+@derive(Model)
+@model(table: "directory_members", indexes: #{by_name: ["name", "tenant_id"]}, unique_indexes: #{
+  tenant_email: ["tenant_id", "email"],
+})
+struct DirectoryMember {
+  @model(primary_key: true, generated: true, column: "member_id")
+  id: int,
+  @model(index: true, column: "tenant_key")
+  tenant_id: int,
+  @model(column: "email_addr")
+  email: str,
+  @model(unique: true)
+  alias: str,
+  name: str = "New member",
+  note: str? = "Created",
+}
+
+@derive(Model)
+@model(table: "optional_tags")
+struct OptionalTag {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(unique: true)
+  code: str?,
+  label: str = "New tag",
+}
+
+// These table/name pairs used to collapse to the same SQL index name.
+@derive(Model)
+@model(table: "a_b", unique_indexes: #{c: ["code"]})
+struct FirstBoundary {
+  @model(primary_key: true, generated: true)
+  id: int,
+  code: str,
+}
+
+@derive(Model)
+@model(table: "a", unique_indexes: #{b_c: ["code"]})
+struct SecondBoundary {
+  @model(primary_key: true, generated: true)
+  id: int,
+  code: str,
+}
+
+fn expect_unique<T>(result: Result<T, OrmError>) {
+  match result {
+    .Err(error) => match error {
+      .Database(cause) => assert(cause.is(DbErrorKind::UniqueViolation)),
+      _ => panic("expected a typed unique constraint failure"),
+    },
+    _ => panic("a different unique constraint must not be ignored"),
+  }
+}
+
+fn exercise_indexes() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  DirectoryMember::create_table(db).unwrap()
+  DirectoryMember::create_table(db).unwrap()
+  let statements = DirectoryMember::schema_statements()
+  assert(statements.len() == 4)
+  assert(DirectoryMember::schema_sql() == statements.join(";\n"))
+  assert(statements[1].contains("zolo_17_directory_members_tenant_id_idx"))
+  assert(statements[1].contains("(\"tenant_key\")"))
+  assert(statements[2].contains("(\"name\", \"tenant_key\")"))
+  assert(statements[3].contains("UNIQUE INDEX"))
+  assert(statements[3].contains("(\"tenant_key\", \"email_addr\")"))
+  let indexes = db.query(
+    "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'zolo_17_directory_members_%' ORDER BY name",
+    [],
+  ).unwrap()
+  assert(indexes.len() == 3)
+  let columns = db.query("PRAGMA index_info('zolo_17_directory_members_tenant_email_uidx')", []).unwrap()
+  assert(columns[0]["name"] == "tenant_key")
+  assert(columns[1]["name"] == "email_addr")
+  FirstBoundary::create_table(db).unwrap()
+  SecondBoundary::create_table(db).unwrap()
+  let owners = db.query(
+    "SELECT name, tbl_name FROM sqlite_master WHERE name IN ('zolo_3_a_b_c_uidx', 'zolo_1_a_b_c_uidx') ORDER BY name",
+    [],
+  ).unwrap()
+  assert(owners.len() == 2)
+  assert(owners[0]["tbl_name"] == "a")
+  assert(owners[1]["tbl_name"] == "a_b")
+  let first = FirstBoundaryInsert { code: "same" }
+  let second = SecondBoundaryInsert { code: "same" }
+  assert(FirstBoundary::upsert_by_index_c(db, first, FirstBoundary::changes()).unwrap() != nil)
+  assert(SecondBoundary::upsert_by_index_b_c(db, second, SecondBoundary::changes()).unwrap() != nil)
+  assert(FirstBoundary::upsert_by_index_c(db, first, FirstBoundary::changes()).unwrap() == nil)
+  assert(SecondBoundary::upsert_by_index_b_c(db, second, SecondBoundary::changes()).unwrap() == nil)
+}
+
+@allow(max_function_length)
+fn exercise_upsert() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  DirectoryMember::create_table(db).unwrap()
+  db.execute("CREATE TABLE update_events (member_id INTEGER NOT NULL)", []).unwrap()
+  db.execute(
+    "CREATE TRIGGER directory_member_updated AFTER UPDATE ON directory_members BEGIN INSERT INTO update_events (member_id) VALUES (NEW.member_id); END",
+    [],
+  ).unwrap()
+  let input = DirectoryMemberInsert {
+    tenant_id: 7,
+    email: "ana@example.com",
+    alias: "ana",
+    note: "Stored note",
+  }
+  let base_patch = DirectoryMember::changes().set_name("Updated 'member'")
+  let inserted = DirectoryMember::upsert_by_index_tenant_email(db, input, base_patch).unwrap() ?? panic(
+    "insert must return a row",
+  )
+  assert(inserted.id > 0)
+  assert(inserted.name == "New member")
+  assert(inserted.note == "Stored note")
+  let replacement = DirectoryMemberInsert {
+    tenant_id: 7,
+    email: "ana@example.com",
+    alias: "new-alias",
+  }
+  let updated = DirectoryMember::upsert_by_index_tenant_email(db, replacement, base_patch).unwrap() ?? panic(
+    "update must return a row",
+  )
+  assert(updated.id == inserted.id)
+  assert(updated.name == "Updated 'member'")
+  assert(updated.note == "Stored note")
+  assert(updated.alias == "ana")
+  let cleared = DirectoryMember::upsert_by_index_tenant_email(
+    db,
+    replacement,
+    base_patch.set_note(nil),
+  ).unwrap() ?? panic("update must return a row")
+  assert(cleared.note == nil)
+  assert(base_patch.plan.assignments.len() == 1)
+  let do_nothing = DirectoryMember::upsert_by_index_tenant_email_statement(
+    replacement,
+    DirectoryMember::changes(),
+  )
+  assert(
+    do_nothing.text.contains("ON CONFLICT (\"tenant_key\", \"email_addr\") DO NOTHING RETURNING"),
+  )
+  assert(!do_nothing.text.contains("DO UPDATE"))
+  let inspected = DirectoryMember::upsert_by_index_tenant_email_statement(
+    replacement,
+    base_patch.set_note(nil),
+  )
+  assert(inspected.text.contains("DO UPDATE SET \"name\" = ?, \"note\" = NULL RETURNING"))
+  assert(inspected.params[inspected.params.len() - 1] == "Updated 'member'")
+  assert(!inspected.text.contains("Updated 'member'"))
+  assert(do_nothing.params.len() + 1 == inspected.params.len())
+  let before = db.query("SELECT COUNT(*) AS total FROM update_events", []).unwrap()[0]["total"]
+  assert(before == 2)
+  let skipped = DirectoryMember::upsert_by_index_tenant_email(
+    db,
+    replacement,
+    DirectoryMember::changes(),
+  ).unwrap()
+  assert(skipped == nil)
+  assert(db.query("SELECT COUNT(*) AS total FROM update_events", []).unwrap()[0]["total"] == before)
+  // The input/defaults did not replace columns omitted from the explicit patch.
+  let stored = DirectoryMember::find_or_error(db, inserted.id).unwrap()
+  assert(stored.alias == "ana")
+  assert(stored.name == "Updated 'member'")
+  assert(stored.note == nil)
+  let explicit = DirectoryMemberInsert {
+    id: 77,
+    tenant_id: 8,
+    email: "bia@example.com",
+    alias: "bia",
+  }
+  let created = DirectoryMember::upsert_by_id(db, explicit, DirectoryMember::changes()).unwrap() ?? panic(
+    "explicit key must insert",
+  )
+  assert(created.id == 77)
+  let renamed = DirectoryMember::upsert_by_alias(
+    db,
+    explicit,
+    DirectoryMember::changes().set_name("Bia"),
+  ).unwrap() ?? panic("field UNIQUE must update")
+  assert(renamed.id == 77)
+  assert(renamed.name == "Bia")
+  // Targeting the PK must preserve another UNIQUE failure, including DO NOTHING.
+  let conflicting = DirectoryMemberInsert {
+    id: 900,
+    tenant_id: 9,
+    email: "other@example.com",
+    alias: "ana",
+  }
+  expect_unique(DirectoryMember::upsert_by_id(db, conflicting, DirectoryMember::changes()))
+  expect_unique(
+    DirectoryMember::upsert_by_id(db, conflicting, DirectoryMember::changes().set_name("Wrong")),
+  )
+  assert(DirectoryMember::query().count(db).unwrap() == 2)
+  assert(!DirectoryMember::query().where_id(900).exists(db).unwrap())
+  // A failure in the explicit UPDATE is also propagated and rolls back atomically.
+  expect_unique(
+    DirectoryMember::upsert_by_id(db, explicit, DirectoryMember::changes().set_alias("ana")),
+  )
+  assert(DirectoryMember::find_or_error(db, 77).unwrap().alias == "bia")
+  assert(DirectoryMember::find_or_error(db, 77).unwrap().name == "Bia")
+}
+
+fn exercise_nullable_conflict() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  OptionalTag::create_table(db).unwrap()
+  let no_code = OptionalTagInsert { code: nil }
+  let first = OptionalTag::upsert_by_code(db, no_code, OptionalTag::changes()).unwrap() ?? panic(
+    "NULL inserts",
+  )
+  let second = OptionalTag::upsert_by_code(db, no_code, OptionalTag::changes()).unwrap() ?? panic(
+    "another NULL inserts",
+  )
+  assert(first.id != second.id)
+  let named = OptionalTagInsert { code: "named" }
+  assert(OptionalTag::upsert_by_code(db, named, OptionalTag::changes()).unwrap() != nil)
+  assert(OptionalTag::upsert_by_code(db, named, OptionalTag::changes()).unwrap() == nil)
+  assert(OptionalTag::query().count(db).unwrap() == 3)
+}
+
+@test
+fn schema_indexes() { exercise_indexes() }
+
+@test
+fn atomic_upserts() { exercise_upsert() }
+
+@test
+fn nullable_conflict_targets() { exercise_nullable_conflict() }
+
+exercise_indexes()
+exercise_upsert()
+exercise_nullable_conflict()
+print("orm schema writes: ok")

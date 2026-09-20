@@ -3,6 +3,8 @@ use std::database::{Database, DbError, SQL}
 
 pub enum OrmError {
   Database(DbError),
+  /// A required read matched no record; carries the model name.
+  NotFound(str),
   Decode(str),
   FieldDecode(DecodeError),
   UnsafeMutation(str),
@@ -49,6 +51,16 @@ impl UpdatePlan {
     let slot = bind_value(params, value)
     next.push(Assignment.new(column, slot, params))
     return UpdatePlan.new(next)
+  }
+  /// Append explicit update bindings after the insert bindings.
+  fn conflict_clause(self, params: [Any]) -> str {
+    if self.assignments.len() == 0 { return "DO NOTHING" }
+    let clauses: [str] = []
+    for assignment in self.assignments {
+      clauses.push(assignment.column + " = " + assignment.slot)
+      for value in assignment.params { params.push(value) }
+    }
+    return "DO UPDATE SET " + clauses.join(", ")
   }
   fn apply(self, db: Database, table_name: str, key_column: str, key: Any) -> Result<int, OrmError> {
     if self.assignments.len() == 0 { return Result::Ok(0) }
@@ -196,6 +208,14 @@ impl QueryPlan {
     return read_int(rows[0]["orm_count"], "count")
   }
 
+  /// Check for matching records independently of ordering and pagination.
+  /// Selects a constant and stops at one row; no model fields are decoded.
+  fn exists(self, db: Database) -> Result<bool, OrmError> {
+    let stmt = self.try_statement("exists")?
+    let rows = stmt.query(db)?
+    return Result::Ok(rows.len() > 0)
+  }
+
   /// Unfiltered deletion and pagination on mutations require an explicit decision.
   fn delete(self, db: Database) -> Result<int, OrmError> {
     if self.filters == nil {
@@ -289,15 +309,21 @@ pub fn read_bool(value: Any, column: str, model_name: str = "") -> Result<bool, 
 
 struct ModelOptions {
   table: str = "",
+  indexes: {str: [str]} = #{},
+  unique_indexes: {str: [str]} = #{},
 }
 
 struct FieldOptions {
   column: str = "",
   primary_key: bool = false,
   unique: bool = false,
+  index: bool = false,
   generated: bool = false,
   belongs_to: str = "",
   references: str = "id",
+  foreign_key: bool = false,
+  on_delete: str = "",
+  on_update: str = "",
   /// Explicit SQL literal default for schema migrations; Zolo defaults remain application-side.
   default_sql: str = "",
 }
@@ -318,6 +344,106 @@ fn identifier(name: str) -> str {
 @comptime
 fn column_name(field) -> str {
   return if field.opts.column == "" { field.name } else { field.opts.column }
+}
+
+@comptime
+fn index_spec(info, table_name: str, name: str, fields: [str], unique: bool) {
+  identifier(name)
+  if fields.len() == 0 { panic("orm: index requires at least one field: " + name) }
+  let columns: [str] = []
+  for field_name in fields {
+    let matches = info.fields.filter(|field| field.name == field_name)
+    if matches.len() != 1 { panic("orm: unknown index field in " + name) }
+    let column = column_name(matches[0])
+    if columns.contains(column) { panic("orm: duplicate index field in " + name) }
+    columns.push(column)
+  }
+  let suffix = if unique { "_uidx" } else { "_idx" }
+  let sql_name = "zolo_{table_name.len()}_" + table_name + "_" + name + suffix
+  identifier(sql_name)
+  return #{name, sql_name, columns, unique}
+}
+
+@comptime
+fn model_indexes(info, table_name: str) {
+  let indexes = []
+  let seen: [str] = []
+  for field in info.fields {
+    if field.opts.index {
+      if seen.contains(field.name.lower()) { panic("orm: duplicate index name: " + field.name) }
+      seen.push(field.name.lower())
+      indexes.push(index_spec(info, table_name, field.name, [field.name], false))
+    }
+  }
+  for name in info.opts.indexes.keys().sort() {
+    if seen.contains(name.lower()) { panic("orm: duplicate index name: " + name) }
+    seen.push(name.lower())
+    indexes.push(index_spec(info, table_name, name, info.opts.indexes[name], false))
+  }
+  for name in info.opts.unique_indexes.keys().sort() {
+    if seen.contains(name.lower()) { panic("orm: duplicate index name: " + name) }
+    seen.push(name.lower())
+    indexes.push(index_spec(info, table_name, name, info.opts.unique_indexes[name], true))
+  }
+  return indexes
+}
+
+@comptime
+fn model_option(decorators, name: str, fallback) {
+  for decorator in decorators {
+    if decorator.name == "model" {
+      let value = decorator.named[name]
+      if value != nil { return value }
+    }
+  }
+  return fallback
+}
+
+@comptime
+fn foreign_action(action: str) -> str {
+  return match action {
+    "" => "NO ACTION",
+    "no_action" => "NO ACTION",
+    "restrict" => "RESTRICT",
+    "cascade" => "CASCADE",
+    "set_null" => "SET NULL",
+    "set_default" => "SET DEFAULT",
+    _ => panic("orm: unknown foreign-key action: " + action),
+  }
+}
+
+@comptime
+fn foreign_key_clause(field) -> str {
+  if !field.opts.foreign_key { return "" }
+  if field.opts.belongs_to == "" { panic("orm: foreign_key requires belongs_to") }
+  identifier(field.opts.belongs_to)
+  let parent = resolve_visible_type(field.opts.belongs_to)
+  if parent == nil { panic("orm: foreign-key model is not visible: " + field.opts.belongs_to) }
+  if parent.kind != "struct" { panic("orm: foreign-key target must be a model struct") }
+  let targets = parent.fields.filter(|target| target.name == field.opts.references)
+  if targets.len() != 1 { panic("orm: unknown referenced field: " + field.opts.references) }
+  let target = targets[0]
+  if field_kind(target) != field_kind(field) { panic("orm: foreign-key field type does not match referenced field") }
+  var unique = model_option(target.decorators, "primary_key", false) || model_option(target.decorators, "unique", false)
+  let unique_indexes = model_option(parent.decorators, "unique_indexes", #{})
+  for name in unique_indexes.keys() {
+    let fields = unique_indexes[name]
+    if fields.len() == 1 && fields[0] == target.name { unique = true }
+  }
+  if !unique { panic("orm: foreign-key target must be a primary key or a single-field UNIQUE key") }
+  let parent_table = model_option(parent.decorators, "table", "")
+  let table_name = if parent_table == "" { parent.name.lower() } else { parent_table }
+  let target_column = model_option(target.decorators, "column", "")
+  let target_name = if target_column == "" { target.name } else { target_column }
+  let on_delete = foreign_action(field.opts.on_delete)
+  let on_update = foreign_action(field.opts.on_update)
+  if (on_delete == "SET NULL" || on_update == "SET NULL") && !field.type.is_optional {
+    panic("orm: SET NULL requires an optional foreign-key field")
+  }
+  if (on_delete == "SET DEFAULT" || on_update == "SET DEFAULT") && !field.type.is_optional && field.opts.default_sql == "" {
+    panic("orm: SET DEFAULT requires default_sql on a required foreign-key field")
+  }
+  return " REFERENCES " + identifier(table_name) + " (" + identifier(target_name) + ") ON DELETE " + on_delete + " ON UPDATE " + on_update
 }
 
 @comptime
@@ -387,6 +513,9 @@ pub fn Model(info) -> Syntax<.Items> {
     if field.opts.generated && field.has_default {
       panic("orm: generated key cannot declare an application default")
     }
+    if !field.opts.foreign_key && (field.opts.on_delete != "" || field.opts.on_update != "") {
+      panic("orm: foreign-key actions require foreign_key: true")
+    }
     if field.opts.belongs_to != "" && (kind != "int" && kind != "str") {
       panic("orm: belongs_to requires an integer or string key")
     }
@@ -418,14 +547,17 @@ pub fn Model(info) -> Syntax<.Items> {
   }
   let schema_type = syntax.ident(schema_name)
   let changes = syntax.ident(info.name + "Changes")
+  let insert_type = generated_local(info, info.name + "Insert")
+  let indexes = model_indexes(info, table_name)
   let column_names = info.fields.map(|field| column_name(field))
   let names = info.fields.map(|field| identifier(column_name(field)))
   let columns = names.join(", ")
   let insert_prefix = "INSERT INTO " + table + " (" + columns + ") VALUES "
   let ddl_columns = info.fields.map(
     |field| {
+      let foreign = foreign_key_clause(field)
       if field.opts.generated {
-        return identifier(column_name(field)) + " INTEGER PRIMARY KEY"
+        return identifier(column_name(field)) + " INTEGER PRIMARY KEY" + foreign
       }
       let kind = field_kind(field)
       let sql_type = match kind {
@@ -439,10 +571,17 @@ pub fn Model(info) -> Syntax<.Items> {
       let primary = if field.opts.primary_key { " PRIMARY KEY" } else { "" }
       let unique = if field.opts.unique { " UNIQUE" } else { "" }
       let database_default = if field.opts.default_sql == "" { "" } else { " DEFAULT " + field.opts.default_sql }
-      return identifier(column_name(field)) + " " + sql_type + nullable + primary + unique + database_default
+      return identifier(column_name(field)) + " " + sql_type + nullable + primary + unique + database_default + foreign
     },
   )
-  let ddl = "CREATE TABLE IF NOT EXISTS " + table + " (" + ddl_columns.join(", ") + ")"
+  let table_ddl = "CREATE TABLE IF NOT EXISTS " + table + " (" + ddl_columns.join(", ") + ")"
+  let ddl_statements = [table_ddl]
+  for index in indexes {
+    let unique = if index.unique { "UNIQUE " } else { "" }
+    let index_columns = index.columns.map(|column| identifier(column)).join(", ")
+    ddl_statements.push("CREATE " + unique + "INDEX IF NOT EXISTS " + identifier(index.sql_name) + " ON " + table + " (" + index_columns + ")")
+  }
+  let ddl = ddl_statements.join(";\n")
   let decode = info.fields.map(
     |field| {
       let value = decode_field(field, info.name)
@@ -461,6 +600,7 @@ pub fn Model(info) -> Syntax<.Items> {
     },
   )
   let values = info.fields.map(|field| quote expr { bind_value(params, self.${field.member}) })
+  let insert_values = info.fields.map(|field| quote expr { bind_value(params, insert.${field.member}) })
   let schema_fields = info.fields.map(
     |field| {
       let column = column_name(field)
@@ -532,6 +672,19 @@ pub fn Model(info) -> Syntax<.Items> {
       let loader = syntax.ident("load_" + field.name)
       let within = syntax.ident("where_" + field.name + "_in")
       let key_type = if field.type.is_optional { field.type.inner.ref } else { field.type.ref }
+      let parent_info = resolve_visible_type(field.opts.belongs_to)
+      var optional_parent_key = false
+      if parent_info != nil {
+        let referenced = parent_info.fields.filter(|item| item.name == field.opts.references)
+        if referenced.len() == 1 { optional_parent_key = referenced[0].type.is_optional }
+      }
+      let add_key = quote stmt { if seen[key] != true { keys.push(key); seen[key] = true } }
+      let collect_key = if optional_parent_key {
+        quote stmt { if key != nil { ${add_key} } }
+      } else { add_key }
+      let related_children = if optional_parent_key {
+        quote expr { if key == nil { [] } else { grouped[key] ?? [] } }
+      } else { quote expr { grouped[key] ?? [] } }
       let group_child = quote stmt {
       if grouped[key] == nil { grouped[key] = [] }
       grouped[key].push(child)
@@ -545,8 +698,8 @@ pub fn Model(info) -> Syntax<.Items> {
         let keys: [${key_type}] = []
         let seen: {${key_type}: bool} = #{}
         for parent in parents {
-          let key: ${key_type} = parent.${parent_key}
-          if seen[key] != true { keys.push(key); seen[key] = true }
+          let key = parent.${parent_key}
+          ${collect_key}
         }
         let grouped: {${key_type}: [${info.ref}]} = #{}
         var start = 0
@@ -563,7 +716,8 @@ pub fn Model(info) -> Syntax<.Items> {
         }
         let result: [Related<${parent_type}, ${info.ref}>] = []
         for parent in parents {
-          let children = grouped[parent.${parent_key}] ?? []
+          let key = parent.${parent_key}
+          let children = ${related_children}
           result.push(Related.new(parent, children))
         }
         return Result::Ok(result)
@@ -612,6 +766,60 @@ pub fn Model(info) -> Syntax<.Items> {
       return quote param { ${field.member}: ${field.type.ref} }
     },
   )
+  let insert_fields = info.fields.map(
+    |field| {
+      if field.opts.generated {
+        return quote member { pub ${field.member}: int? = nil, }
+      }
+      if field.has_default {
+        let method = syntax.ident("__orm_default_" + field.name)
+        return quote member { pub ${field.member}: ${field.type.ref} = ${schema_type}::${method}(), }
+      }
+      if field.type.is_optional {
+        return quote member { pub ${field.member}: ${field.type.ref} = nil, }
+      }
+      return quote member { pub ${field.member}: ${field.type.ref}, }
+    },
+  )
+  let conflict_targets = []
+  let conflict_names: [str] = []
+  for field in info.fields {
+    if field.opts.primary_key || field.opts.unique {
+      let method = "upsert_by_" + field.name
+      for name in [method, method + "_statement"] {
+        if conflict_names.contains(name) { panic("orm: generated upsert method collision: " + name) }
+        conflict_names.push(name)
+      }
+      conflict_targets.push(#{method, columns: identifier(column_name(field))})
+    }
+  }
+  for index in indexes {
+    if index.unique {
+      let method = "upsert_by_index_" + index.name
+      for name in [method, method + "_statement"] {
+        if conflict_names.contains(name) { panic("orm: generated upsert method collision: " + name) }
+        conflict_names.push(name)
+      }
+      conflict_targets.push(#{method, columns: index.columns.map(|column| identifier(column)).join(", ")})
+    }
+  }
+  let upsert_methods = conflict_targets.map(
+    |target| {
+      let method = syntax.ident(target.method)
+      let inspect = syntax.ident(target.method + "_statement")
+      return quote member {
+      /// Inspect the parameterized insert and explicit conflict update without executing it.
+      pub fn ${inspect}(insert: ${insert_type}, update: ${changes}) -> Statement {
+        return ${schema_type}::__orm_upsert_statement(insert, update, ${target.columns})
+      }
+      /// Atomically insert or apply only the explicit patch on this unique conflict target.
+      /// An empty patch performs DO NOTHING; a conflict then returns nil.
+      pub fn ${method}(db: Database, insert: ${insert_type}, update: ${changes}) -> Result<${info.ref}?, OrmError> {
+        return ${schema_type}::__orm_upsert(db, insert, update, ${target.columns})
+      }
+    }
+    },
+  )
   let create_slots = inputs.map(
     |field| quote expr { ${binder_alias}(${bindings_var}, ${field.member}) },
   )
@@ -650,12 +858,33 @@ pub fn Model(info) -> Syntax<.Items> {
     impl ${schema_type} {
       ${..schema_readers}
       ${..default_thunks}
+      pub fn __orm_insert_statement(insert: ${insert_type}) -> Statement {
+        let params: [Any] = []
+        let slots = [${..insert_values}]
+        return Statement.new(${insert_prefix} + "(" + slots.join(", ") + ")", params)
+      }
+      pub fn __orm_upsert_statement(insert: ${insert_type}, update: ${changes}, target: str) -> Statement {
+        let statement = ${schema_type}::__orm_insert_statement(insert)
+        let action = update.plan.conflict_clause(statement.params)
+        return Statement.new(statement.text + " ON CONFLICT (" + target + ") " + action + ${returning}, statement.params)
+      }
+      pub fn __orm_upsert(db: Database, insert: ${insert_type}, update: ${changes}, target: str) -> Result<${info.ref}?, OrmError> {
+        let rows = ${schema_type}::__orm_upsert_statement(insert, update, target).query(db)?
+        if rows.len() == 0 && update.plan.assignments.len() == 0 { return Result::Ok(nil) }
+        if rows.len() != 1 { return Result::Err(OrmError::Decode("upsert expected one returned row")) }
+        let value = ${info.ref}::from_row(rows[0])?
+        return Result::Ok(value)
+      }
       pub fn __orm_decode_created(${rows_var}: [Any]) -> Result<${info.ref}, OrmError> {
         if ${rows_var}.len() != 1 {
           return Result::Err(OrmError::Decode("create expected one returned row"))
         }
         return ${info.ref}::from_row(${rows_var}[0])
       }
+    }
+    /// Inputs for atomic upsert; a nil generated integer key asks SQLite to allocate one.
+    pub struct ${insert_type} {
+      ${..insert_fields}
     }
     pub struct ${changes} {
       pub plan: UpdatePlan,
@@ -706,6 +935,14 @@ pub fn Model(info) -> Syntax<.Items> {
         if values.len() == 0 { return Result::Ok(nil) }
         return Result::Ok(values[0])
       }
+      /// Read the first record, preserving ordering and pagination; absence is recoverable.
+      pub fn first_or_error(self, db: Database) -> Result<${info.ref}, OrmError> {
+        let value = self.first(db)?
+        if value == nil { return Result::Err(OrmError::NotFound(${info.name})) }
+        return Result::Ok(value)
+      }
+      /// Check matching records before pagination without decoding a model.
+      pub fn exists(self, db: Database) -> Result<bool, OrmError> { return self.plan.exists(db) }
       pub fn count(self, db: Database) -> Result<int, OrmError> { return self.plan.count(db) }
       pub fn delete(self, db: Database) -> Result<int, OrmError> { return self.plan.delete(db) }
     }
@@ -714,6 +951,7 @@ pub fn Model(info) -> Syntax<.Items> {
       pub fn query() -> ${query} { return ${query}.new(QueryPlan.new(${table_name}, [${..column_names}])) }
       pub fn changes() -> ${changes} { return ${changes}.new(UpdatePlan.new()) }
       ${..relations}
+      ${..upsert_methods}
       /// Insert with named inputs/defaults and decode the returned database row.
       pub fn create(${connection_var}: Database, ${..create_params}) -> Result<${info.ref}, OrmError> {
         let ${bindings_var}: [Any] = []
@@ -722,8 +960,11 @@ pub fn Model(info) -> Syntax<.Items> {
         return ${schema_type}::__orm_decode_created(${rows_var})
       }
       pub fn schema_sql() -> str { return ${ddl} }
+      pub fn schema_statements() -> [str] { return [${..ddl_statements}] }
       pub fn create_table(db: Database) -> Result<int, OrmError> {
-        return Statement.new(${ddl}, []).execute(db)
+        var affected = 0
+        for ddl in ${info.ref}::schema_statements() { affected = affected + Statement.new(ddl, []).execute(db)? }
+        return Result::Ok(affected)
       }
       pub fn from_row(row: Any) -> Result<${info.ref}, OrmError> {
         return Result::Ok(${info.ref} { ${..decode} })
@@ -738,6 +979,10 @@ pub fn Model(info) -> Syntax<.Items> {
       }
       pub fn find(db: Database, key: ${key.type.ref}) -> Result<${info.ref}?, OrmError> {
         return ${query}.new(QueryPlan.new(${table_name}, [${..column_names}]).equal(${column_name(key)}, key)).first(db)
+      }
+      /// Find a required record by primary key; absence returns NotFound(model name).
+      pub fn find_or_error(db: Database, key: ${key.type.ref}) -> Result<${info.ref}, OrmError> {
+        return ${query}.new(QueryPlan.new(${table_name}, [${..column_names}]).equal(${column_name(key)}, key)).first_or_error(db)
       }
       pub fn insert_statement(self) -> Statement {
         let params: [Any] = []

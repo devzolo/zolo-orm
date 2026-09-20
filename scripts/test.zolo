@@ -31,13 +31,18 @@ run_step(sh"{zolo} check src/lib.zolo".cwd(root), "check src/lib.zolo")
 
 run_step(sh"{zolo} install".cwd(examples), "install examples")
 let runnable = [
-    "basic", "integration", "dx", "dx_imports",
-    "expressions", "hygiene", "relations", "query_plan",
+    "basic", "upsert", "relationships", "integration", "dx", "dx_imports",
+    "expressions", "hygiene", "required_reads", "error_handling", "schema_writes", "foreign_keys", "relations", "query_plan",
 ]
 for example in runnable {
     run_step(sh"{zolo} run {example}.zolo --no-cache".cwd(examples), "run {example}.zolo")
 }
 run_step(sh"{zolo} test integration.zolo".cwd(examples), "test integration.zolo")
+run_step(sh"{zolo} test dx_imports.zolo".cwd(examples), "test dx_imports.zolo")
+run_step(sh"{zolo} test required_reads.zolo".cwd(examples), "test required_reads.zolo")
+run_step(sh"{zolo} test error_handling.zolo".cwd(examples), "test error_handling.zolo")
+run_step(sh"{zolo} test schema_writes.zolo".cwd(examples), "test schema_writes.zolo")
+run_step(sh"{zolo} test foreign_keys.zolo".cwd(examples), "test foreign_keys.zolo")
 
 run_step(sh"{zolo} install".cwd(tests), "install tests")
 let cases = [
@@ -59,6 +64,27 @@ let cases = [
     CompileFail { file: "wrong_sql_parameter.zolo", patterns: ["SQL value expects.*int.*found.*str"] },
     CompileFail { file: "invalid_generated_key.zolo", patterns: ["generated requires an integer primary key"] },
     CompileFail { file: "query_method_collision.zolo", patterns: ["generated query method collision: where_id_not"] },
+    CompileFail { file: "unknown_index_field.zolo", patterns: ["unknown index field"] },
+    CompileFail { file: "empty_index.zolo", patterns: ["index requires at least one field"] },
+    CompileFail { file: "duplicate_index_field.zolo", patterns: ["duplicate index field"] },
+    CompileFail { file: "duplicate_index_name.zolo", patterns: ["duplicate index name"] },
+    CompileFail { file: "duplicate_field_index_case.zolo", patterns: ["duplicate index name"] },
+    CompileFail { file: "invalid_index_name.zolo", patterns: ["identifiers must contain"] },
+    CompileFail { file: "upsert_non_unique.zolo", patterns: ["TE101"] },
+    CompileFail { file: "upsert_wrong_insert.zolo", patterns: ["TE111"] },
+    CompileFail { file: "upsert_wrong_patch.zolo", patterns: ["TE111"] },
+    CompileFail { file: "upsert_method_collision.zolo", patterns: ["generated upsert method collision"] },
+    CompileFail { file: "upsert_index_collision.zolo", patterns: ["generated upsert method collision"] },
+    CompileFail { file: "foreign_key_without_model.zolo", patterns: ["foreign_key requires belongs_to"] },
+    CompileFail { file: "foreign_actions_without_key.zolo", patterns: ["actions require foreign_key"] },
+    CompileFail { file: "foreign_unknown_model.zolo", patterns: ["model is not visible"] },
+    CompileFail { file: "foreign_unknown_field.zolo", patterns: ["unknown referenced field"] },
+    CompileFail { file: "foreign_non_unique.zolo", patterns: ["UNIQUE key"] },
+    CompileFail { file: "foreign_wrong_type.zolo", patterns: ["field type does not match"] },
+    CompileFail { file: "foreign_invalid_action.zolo", patterns: ["unknown foreign.key action"] },
+    CompileFail { file: "foreign_non_optional_set_null.zolo", patterns: ["SET NULL requires an optional"] },
+    CompileFail { file: "foreign_set_default_without_sql_delete.zolo", patterns: ["SET DEFAULT requires default_sql"] },
+    CompileFail { file: "foreign_set_default_without_sql_update.zolo", patterns: ["SET DEFAULT requires default_sql"] },
 ]
 for case in cases {
     let out = sh"{zolo} check {case.file}".cwd(tests).run_raw()

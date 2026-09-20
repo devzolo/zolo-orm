@@ -1,0 +1,155 @@
+//! Required reads return recoverable absence; existence checks avoid model decoding.
+use std::database::Database
+use orm::{Model, OrmError}
+
+@derive(Model)
+@model(table: "read_accounts")
+struct ReadAccount {
+  @model(primary_key: true, generated: true, column: "account_id")
+  id: int,
+  email: str,
+  active: bool = true,
+}
+
+@derive(Model)
+@model(table: "read_tokens")
+struct ReadToken {
+  @model(primary_key: true, column: "token_key")
+  key: str,
+  label: str,
+}
+
+fn expect_missing<T>(result: Result<T, OrmError>, model_name: str) {
+  match result {
+    .Err(error) => match error {
+      .NotFound(model) => assert(model == model_name),
+      _ => panic("expected a structured missing-record error"),
+    },
+    _ => panic("required read unexpectedly found a record"),
+  }
+}
+
+fn expect_decode<T>(result: Result<T, OrmError>) {
+  match result {
+    .Err(error) => match error {
+      .FieldDecode(details) => {
+        assert(details.model == "ReadAccount")
+        assert(details.field == "active")
+        assert(details.expected == "bool or 0/1")
+      },
+      _ => panic("required read must preserve the field decoding error"),
+    },
+    _ => panic("malformed database record was accepted"),
+  }
+}
+
+fn expect_database<T>(result: Result<T, OrmError>) {
+  match result {
+    .Err(error) => match error {
+      .Database(_) => { },
+      _ => panic("database failure must not become a missing-record error"),
+    },
+    _ => panic("query unexpectedly succeeded against a missing table"),
+  }
+}
+
+fn exercise_required_reads() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  ReadAccount::create_table(db).unwrap()
+  ReadToken::create_table(db).unwrap()
+  let ana = ReadAccount::create(db, email: "ana@example.com").unwrap()
+  let bia = ReadAccount::create(db, email: "bia@example.com").unwrap()
+  let base = ReadAccount::query().where_active(true).order_by_id()
+  assert(ReadAccount::find_or_error(db, ana.id).unwrap().email == ana.email)
+  assert(base.first_or_error(db).unwrap().id == ana.id)
+  assert(base.limit(10).offset(1).first_or_error(db).unwrap().id == bia.id)
+  assert(
+    ReadAccount::query().order_by_id(descending: true).first_or_error(db).unwrap().id == bia.id,
+  )
+  assert(base.first_or_error(db).unwrap().id == ana.id)
+  assert(base.count(db).unwrap() == 2)
+  assert(base.statement().params.len() == 1)
+  assert(ReadAccount::find(db, 404).unwrap() == nil)
+  expect_missing(ReadAccount::find_or_error(db, 404), "ReadAccount")
+  expect_missing(base.where_email("absent@example.com").first_or_error(db), "ReadAccount")
+  expect_missing(base.limit(1).offset(2).first_or_error(db), "ReadAccount")
+  expect_missing(base.limit(0).first_or_error(db), "ReadAccount")
+  // Mapped string keys retain their type and use bound parameters.
+  let token = "session' OR 1=1 --"
+  ReadToken::create(db, key: token, label: "signed-in session").unwrap()
+  assert(ReadToken::find_or_error(db, token).unwrap().label == "signed-in session")
+  expect_missing(ReadToken::find_or_error(db, "absent"), "ReadToken")
+}
+
+fn exercise_matching_existence() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  ReadAccount::create_table(db).unwrap()
+  let base = ReadAccount::query()
+  assert(!base.exists(db).unwrap())
+  ReadAccount::create(db, email: "ana@example.com").unwrap()
+  ReadAccount::create(db, email: "bia@example.com", active: false).unwrap()
+  let active = base.filter(|account| account.active)
+  let page = active.order_by_id(descending: true).limit(0).offset(500)
+  assert(active.exists(db).unwrap())
+  assert(base.where_active(false).exists(db).unwrap())
+  assert(!active.where_email("absent@example.com").exists(db).unwrap())
+  assert(!base.where_id_in([]).exists(db).unwrap())
+  // Like count, exists asks about matching records before pagination.
+  assert(page.exists(db).unwrap())
+  assert(active.offset(500).exists(db).unwrap())
+  assert(page.plan.exists(db).unwrap())
+  expect_missing(page.first_or_error(db), "ReadAccount")
+  assert(base.count(db).unwrap() == 2)
+  assert(base.statement().params.len() == 0)
+  assert(active.statement().params.len() == 1)
+  // Inspect exactly the low-level existence plan, including binding order.
+  let email = "x' OR 1=1 --"
+  let statement = page.where_email(email).plan.try_statement("exists").unwrap()
+  assert(statement.text.starts_with("SELECT 1 AS \"orm_exists\" FROM"), statement.text)
+  assert(statement.text.ends_with("LIMIT 1"))
+  assert(!statement.text.contains("ORDER BY"))
+  assert(!statement.text.contains("OFFSET"))
+  assert(!statement.text.contains(email))
+  assert(statement.params.len() == 2)
+  assert(statement.params[0] == true)
+  assert(statement.params[1] == email)
+  assert(statement.compile("postgres").unwrap().contains("LIMIT 1"))
+  assert(statement.query(db).unwrap().len() == 0)
+}
+
+fn exercise_read_failures() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  ReadAccount::create_table(db).unwrap()
+  let ana = ReadAccount::create(db, email: "ana@example.com").unwrap()
+  // External SQL or schema drift can leave a row that is not a valid model.
+  db.execute("UPDATE read_accounts SET active = 7", []).unwrap()
+  let account = ReadAccount::query().where_id(ana.id)
+  expect_decode(account.first_or_error(db))
+  expect_decode(ReadAccount::find_or_error(db, ana.id))
+  assert(account.exists(db).unwrap())
+  // Existence does not select even the plan's projected columns.
+  assert(account.plan.project(["absent_column"]).exists(db).unwrap())
+  db.execute("DROP TABLE read_accounts", []).unwrap()
+  expect_database(account.exists(db))
+  expect_database(account.first_or_error(db))
+  expect_database(ReadAccount::find_or_error(db, ana.id))
+  // Preserve first's zero-limit fast path without touching the missing table.
+  expect_missing(account.limit(0).first_or_error(db), "ReadAccount")
+}
+
+@test
+fn required_reads() { exercise_required_reads() }
+
+@test
+fn matching_existence() { exercise_matching_existence() }
+
+@test
+fn read_failures() { exercise_read_failures() }
+
+exercise_required_reads()
+exercise_matching_existence()
+exercise_read_failures()
+print("orm required reads: ok")

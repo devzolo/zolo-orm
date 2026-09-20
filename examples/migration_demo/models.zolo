@@ -1,0 +1,12 @@
+//! The migration CLI reads this schema without running main.zolo.
+use orm::Model
+
+@derive(Model)
+@model(table: "notes")
+pub struct Note {
+  @model(primary_key: true, generated: true)
+  pub id: int,
+  @model(index: true)
+  pub title: str,
+  pub body: str = "",
+}

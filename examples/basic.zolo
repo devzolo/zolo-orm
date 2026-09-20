@@ -1,3 +1,5 @@
+//! Start here: create a model, save a row, patch it and query a projection.
+//! Run from examples/: zolo run basic.zolo --no-cache
 use std::database::Database
 use orm::{Model, OrmError}
 
@@ -14,20 +16,27 @@ struct User {
 }
 
 fn example(db: Database) -> Result<int, OrmError> {
+  // Convenient for this in-memory demo. Use migrations for a persistent schema.
   User::create_table(db)?
   let ana = User::create(db, name: "Ana", email: "ana@example.com")?
-  User::changes().set_note("Created with named arguments").apply(db, ana.id)?
-  let query = User::query().filter(|user| user.active && user.name.starts_with("A")).order_by_name().select(
-    |user| (user.id, user.name),
-  )
-  print(query.statement().text)
-  let users = query.all(db)?
-  print(users[0][1])
+  User::changes().set_note("Welcome").apply(db, ana.id)?
+
+  let users = User::query()
+    .filter(|user| user.active && user.name.starts_with("A"))
+    .order_by_name()
+    .select(|user| (user.id, user.name))
+    .all(db)?
+
+  assert(users.len() == 1)
   assert(users[0][0] == ana.id)
-  print("orm basic: ok")
+  let saved = User::find_or_error(db, ana.id)?
+  assert(saved.note == "Welcome")
+  print("Created: {ana.email}")
+  print("Active user: {users[0][1]}")
   return Result::Ok(users.len())
 }
 
 let db = Database.open("sqlite://:memory:").unwrap()
 defer db.close()
-example(db).unwrap()
+let count = example(db).unwrap()
+print("Matching users: {count}")

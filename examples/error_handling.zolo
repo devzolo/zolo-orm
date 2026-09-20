@@ -1,0 +1,96 @@
+//! Handle duplicate email addresses and roll back related work with typed errors.
+use std::database::{Database, DbErrorKind}
+use orm::{Model, OrmError, transaction}
+
+@derive(Model)
+@model(table: "registered_accounts")
+struct RegisteredAccount {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(unique: true)
+  email: str,
+}
+
+@derive(Model)
+@model(table: "signup_events")
+struct SignupEvent {
+  @model(primary_key: true, generated: true)
+  id: int,
+  email: str,
+}
+
+enum Registration {
+  Created(int),
+  EmailTaken,
+}
+
+// The only caller-supplied unique field in this model is email.
+fn register(db: Database, email: str) -> Result<Registration, OrmError> {
+  let saved = transaction(
+    db,
+    |tx| -> Result<RegisteredAccount, OrmError> {
+      SignupEvent::create(tx, email)?
+      return RegisteredAccount::create(tx, email)
+    },
+  )
+  return match saved {
+    .Ok(account) => Result::Ok(Registration::Created(account.id)),
+    .Err(error) => match error {
+      .Database(cause) => if cause.is(DbErrorKind::UniqueViolation) {
+        Result::Ok(Registration::EmailTaken)
+      } else {
+        Result::Err(error)
+      },
+      _ => Result::Err(error),
+    },
+  }
+}
+
+fn exercise_registration() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  RegisteredAccount::create_table(db).unwrap()
+  SignupEvent::create_table(db).unwrap()
+  // One Result layer gives the caller its application outcome directly.
+  match register(db, "ana@example.com").unwrap() {
+    .Created(id) => assert(id > 0),
+    _ => panic("a new email should register successfully"),
+  }
+  match register(db, "ana@example.com").unwrap() {
+    .EmailTaken => { },
+    _ => panic("a duplicate email should return a recoverable outcome"),
+  }
+  // The event inserted before the duplicate failure was rolled back.
+  assert(RegisteredAccount::query().count(db).unwrap() == 1)
+  assert(SignupEvent::query().count(db).unwrap() == 1)
+  match RegisteredAccount::create(db, email: "ana@example.com") {
+    .Err(error) => match error {
+      .Database(cause) => {
+        assert(cause.is(DbErrorKind::UniqueViolation))
+        assert(cause.driver() == "sqlite")
+        match cause.kind() {
+          .UniqueViolation => { },
+          _ => panic("expected the typed unique-constraint error"),
+        }
+      },
+      _ => panic("expected a wrapped database error"),
+    },
+    _ => panic("duplicate email was accepted"),
+  }
+  // Other database failures remain errors; they never become EmailTaken.
+  db.execute("DROP TABLE signup_events", []).unwrap()
+  match register(db, "bia@example.com") {
+    .Err(error) => match error {
+      .Database(cause) => assert(cause.is(DbErrorKind::QueryFailed)),
+      _ => panic("expected the original database failure"),
+    },
+    _ => panic("missing table should fail registration"),
+  }
+  assert(!RegisteredAccount::query().where_email("bia@example.com").exists(db).unwrap())
+}
+
+@test
+fn registration_errors() { exercise_registration() }
+
+exercise_registration()
+print("orm error handling: ok")
