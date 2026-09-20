@@ -32,7 +32,7 @@ run_step(sh"{zolo} check src/lib.zolo".cwd(root), "check src/lib.zolo")
 run_step(sh"{zolo} install".cwd(examples), "install examples")
 let runnable = [
     "basic", "upsert", "relationships", "integration", "dx", "dx_imports",
-    "expressions", "hygiene", "required_reads", "error_handling", "schema_writes", "foreign_keys", "relations", "query_plan",
+    "expressions", "hygiene", "required_reads", "error_handling", "schema_writes", "foreign_keys", "relations", "query_plan", "joins", "nullable_projections",
 ]
 for example in runnable {
     run_step(sh"{zolo} run {example}.zolo --no-cache".cwd(examples), "run {example}.zolo")
@@ -43,9 +43,20 @@ run_step(sh"{zolo} test required_reads.zolo".cwd(examples), "test required_reads
 run_step(sh"{zolo} test error_handling.zolo".cwd(examples), "test error_handling.zolo")
 run_step(sh"{zolo} test schema_writes.zolo".cwd(examples), "test schema_writes.zolo")
 run_step(sh"{zolo} test foreign_keys.zolo".cwd(examples), "test foreign_keys.zolo")
+run_step(sh"{zolo} test joins.zolo".cwd(examples), "test joins.zolo")
+run_step(sh"{zolo} test nullable_projections.zolo".cwd(examples), "test nullable_projections.zolo")
 
 run_step(sh"{zolo} install".cwd(tests), "install tests")
 let cases = [
+    CompileFail { file: "join_required_right_access.zolo", patterns: ["requires optional field"] },
+    CompileFail { file: "join_unknown_field.zolo", patterns: ["unknown SQL row field"] },
+    CompileFail { file: "join_wrong_column_type.zolo", patterns: ["matching scalar types"] },
+    CompileFail { file: "join_wrong_capture.zolo", patterns: ["incompatible"] },
+    CompileFail { file: "join_lambda_arity.zolo", patterns: ["2 named row parameters"] },
+    CompileFail { file: "join_chained.zolo", patterns: ["TE104"] },
+    CompileFail { file: "join_mutation.zolo", patterns: ["TE104"] },
+    CompileFail { file: "join_required_projection.zolo", patterns: ["TE001"] },
+
     CompileFail { file: "wrong_filter_type.zolo", patterns: ["TE111"] },
     CompileFail { file: "unknown_field.zolo", patterns: ["TE104"] },
     CompileFail { file: "missing_key.zolo", patterns: ["declare exactly one"] },

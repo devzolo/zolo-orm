@@ -1,0 +1,13 @@
+use orm::Model
+use join_parents::Department as Team
+
+@derive(Model)
+@model(table: "join_workers")
+pub struct Worker {
+  @model(primary_key: true, generated: true, column: "worker_key")
+  id: int,
+  @model(column: "display_name")
+  name: str,
+  @model(belongs_to: "Team", column: "department_key")
+  department_id: int?,
+}

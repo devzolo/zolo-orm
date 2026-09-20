@@ -1,0 +1,16 @@
+use orm::Model
+@derive(Model)
+struct Parent {
+  @model(primary_key: true)
+  id: int,
+  name: str,
+}
+@derive(Model)
+struct Child {
+  @model(primary_key: true)
+  id: int,
+  @model(belongs_to: "Parent")
+  parent_id: int?,
+}
+use std::database::Database
+fn wrong(db: Database) { let names: [str] = Child::query().left_join_parent_id().select(|c, p| p?.name).all(db).unwrap() }

@@ -1,6 +1,6 @@
 # Migrations
 
-[Documentation](README.md) · [Runnable migration demo](../examples/migration_demo/README.md)
+[Documentation](README.md) Â· [Runnable migration demo](../examples/migration_demo/README.md)
 
 Migrations turn model changes into reviewed SQL and keep an applied history.
 Use them for persistent databases; `create_table` only creates missing objects
@@ -93,30 +93,76 @@ zolo run main.zolo --no-cache
 The final run recreates the same single demo row. For application data, review
 down SQL before rollback: reverting a schema can discard the data it owns.
 
+## Rebuild a table while preserving its rows
+
+SQLite needs a table copy for changes to existing column definitions and
+foreign-key or UNIQUE constraints. Opt in when generating the reviewed plan:
+
+```sh
+zolo db generate tighten_notes --allow-rebuild
+zolo db migrate --url sqlite://tutorial.db
+zolo db check --url sqlite://tutorial.db
+```
+
+The generator writes both directions: create a replacement table, copy the
+shared columns, replace the original, then recreate indexes. The primary-key
+name, type and generated identity must stay unchanged. A UNIQUE constraint
+checks existing duplicates; making a column required checks existing NULLs.
+A SQL default applies to newly added columns and future inserts; it does not
+silently repair existing NULLs.
+
+Before copying, the runner checks that the current catalog matches the
+previous snapshot, including SQL default values and generated keys. Type
+changes use explicit casts and must round-trip without changing the original
+value. For example, text `'42'` can become an integer, while `'042'`, fractional
+numbers converted to integers and integers that lose precision as floats are
+refused. A rollback repeats these checks against the current data: values
+written after migration can make a reversal unsafe.
+
+Rebuilds use a dedicated connection. Foreign-key enforcement is suspended
+before the transaction, all pending migrations and their history changes stay
+atomic, orphan checks run before commit, and enforcement is restored afterward.
+An error rolls back the whole batch. Custom data-changing migrations cannot
+share that batch: apply them first, then generate the rebuild, so CASCADE and
+other referential actions keep their expected behavior.
+
+Rebuild manifests use format 3 and bind the rebuilt-table policy to the
+checksum. Their SQL must match the generated schema plan. Keep all four files
+together; removing or downgrading the manifest cannot turn the copy into a
+legacy migration. Ordinary changes still use format 2, and existing format 1/2
+checksums remain compatible. Never edit an applied migration.
+
+The [migration demo](../examples/migration_demo/README.md#preserve-data-through-a-rebuild)
+includes an alternate model and a read-only program that checks the same row
+before migration, after migration and after rollback.
+
 ## Supported changes and explicit boundaries
 
 | Change | Behavior |
 | --- | --- |
 | New models with foreign keys | Creates parents before children; rollback drops children first. |
 | Index addition, removal or replacement | Generates reversible SQL. |
-| DROP TABLE or DROP COLUMN | Requires `--allow-destructive` when generating. |
-| Required column without a SQL default | Refused. |
-| Adding a primary-key or UNIQUE column | Refused. |
-| Existing column, foreign key or table UNIQUE constraint changes | Requires an explicit table rebuild; not generated automatically. |
-| Cyclic initial foreign-key graph | Refused by automatic generation. |
+| Nullable column, or required column with a SQL default | Adds the column; UNIQUE additions require `--allow-rebuild`. |
+| Existing column type, nullability, SQL default or uniqueness | Requires `--allow-rebuild` and compatible existing data. |
+| Foreign-key actions or table UNIQUE constraints | Requires `--allow-rebuild`; validates the resulting relations. |
+| DROP TABLE or DROP COLUMN | Requires `--allow-destructive`; constrained columns also require a rebuild. |
+| Dropping a required column without a SQL default | Refused because its definition cannot be restored for existing rows. |
+| New required column without a SQL default | Refused; provide a backfill default first. |
+| Changing primary-key name, type or generated identity | Refused by automatic rebuild. |
+| Cyclic foreign-key graph | Refused by automatic generation. |
 
-A rebuild needs a complete, reviewed migration and a snapshot that describes
-its result. This is not an instruction to edit an already checksummed migration:
-the runner detects edited files. The automatic generator does not yet provide
-a general rebuild workflow.
+`--allow-destructive` permits removing data; rollback restores a dropped
+column with NULL or its SQL default, not its old values. Dropped tables are
+recreated empty. Review both SQL directions and keep backups appropriate to
+your application.
 
-New snapshots use version 2 and retain compatibility with version 1 snapshots
-and their original checksums. Inspection includes index keys, composite
-uniqueness and foreign-key actions. It refuses schema details it cannot
-represent faithfully, including partial/expression/custom-collation indexes,
-deferred foreign keys and directional primary/UNIQUE constraints.
+Automatic rebuilds refuse custom views and triggers, generated SQL columns,
+CHECK constraints, custom collations, AUTOINCREMENT, STRICT/WITHOUT ROWID,
+named constraints and other catalog details the snapshot cannot preserve.
+Inspection also rejects partial/expression/custom-collation indexes, deferred
+foreign keys and directional primary/UNIQUE constraints. Use an explicit,
+reviewed migration workflow for these schemas.
 
-Migrations always enable foreign-key enforcement before their transaction and
-check for orphaned rows. Scripts must not contain `BEGIN`, `COMMIT`,
-`ROLLBACK` or other transaction-control statements: the runner owns the
-transaction around SQL and history updates.
+Scripts must not contain `BEGIN`, `COMMIT`, `ROLLBACK` or other
+transaction-control statements: the runner owns the transaction around SQL
+and history updates. Migration execution currently certifies SQLite.

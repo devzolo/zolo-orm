@@ -1,0 +1,11 @@
+use orm::Model
+
+@derive(Model)
+@model(table: "join_departments")
+pub struct Department {
+  @model(primary_key: true, generated: true, column: "department_key")
+  id: int,
+  @model(column: "display_name")
+  name: str,
+  note: str? = "application default",
+}

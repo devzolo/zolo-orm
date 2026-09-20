@@ -10,6 +10,7 @@ operation you need. Every guide links to executable examples.
 | Insert or update a unique record | [Atomic upserts](models-and-writes.md#atomic-upserts) | [upsert.zolo](../examples/upsert.zolo) |
 | Filter, page or select specific columns | [Queries](queries.md) | [expressions.zolo](../examples/expressions.zolo) |
 | Load children and save related work | [Relations and transactions](relations-and-transactions.md) | [relationships.zolo](../examples/relationships.zolo) |
+| Join related models in a typed query | [INNER and LEFT joins](queries.md#typed-relation-joins) | [joins.zolo](../examples/joins.zolo) |
 | Evolve a persistent database | [Migrations](migrations.md) | [Migration demo](../examples/migration_demo/README.md) |
 | Handle absence and constraint failures | [Errors](errors-and-compatibility.md#errors) | [error_handling.zolo](../examples/error_handling.zolo) |
 | Check support or solve a setup problem | [Compatibility](errors-and-compatibility.md#compatibility) | [Example catalog](../examples/README.md) |

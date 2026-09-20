@@ -48,3 +48,35 @@ reports that it is already up to date.
 See the [migration guide](../../docs/migrations.md) for configuration, baselines,
 drift checks and unsupported schema changes, or return to the
 [example catalog](../README.md).
+
+## Preserve data through a rebuild
+
+After the initial migration and application run above, use the alternate
+[models_rebuilt.zolo](models_rebuilt.zolo). It adds title uniqueness and a SQL
+default for the body. `--schema` selects this file without replacing the
+original model:
+
+```sh
+zolo run inspect.zolo --no-cache
+zolo db generate tighten_notes --schema models_rebuilt.zolo --allow-rebuild
+```
+
+Review the new migration's copy SQL and its inverse, then run:
+
+```sh
+zolo db migrate --url sqlite://tutorial.db
+zolo db check --schema models_rebuilt.zolo --url sqlite://tutorial.db
+zolo run inspect.zolo --no-cache
+zolo db rollback --url sqlite://tutorial.db
+zolo run inspect.zolo --no-cache
+```
+
+Each inspection prints `migration data preserved: ok`. Unlike the application
+entry point, [inspect.zolo](inspect.zolo) performs no inserts or updates, so it
+cannot hide missing rows. Rollback returns to the initial schema and leaves
+the rebuild pending; applying it again exercises the same data-preserving
+transition. Use the alternate `--schema` for checks after reapplying it.
+
+Required values, duplicates or a lossy type conversion cause the rebuild to
+fail atomically. See the [migration guide](../../docs/migrations.md) for the
+catalog restrictions and the difference between rebuild and destructive flags.

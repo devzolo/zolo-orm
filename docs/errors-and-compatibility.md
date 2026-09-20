@@ -13,7 +13,7 @@
 | `Decode(str)` | A row could not be turned into the model. |
 | `FieldDecode(DecodeError)` | A field had an unexpected type. Carries model, field and expected type, never the value. |
 | `UnsafeMutation(str)` | A delete without a filter, or with ordering/pagination. |
-| `Unsupported(str)` | A scalar NULL projection, or a runtime without database support. |
+| `Unsupported(str)` | A runtime without database support. |
 
 For SQLite constraint failures, match `OrmError.Database(cause)` and use
 `cause.is(DbErrorKind::UniqueViolation)` or `match cause.kind()`. Import
@@ -70,14 +70,19 @@ contains what has been published to that branch.
 ## Current boundaries
 
 - One nonoptional primary key per model. Composite primary/foreign keys,
-  generated joins and computed projections are not supported.
+  chained/arbitrary joins and computed projections are not supported. One
+  typed INNER or LEFT belongs_to join per query is supported.
 - Columns support `int`, `float`, `str`, `bool` and their optional forms.
   Decimal, timestamp and blob codecs are not provided.
 - Composite UNIQUE indexes and conflict targets are supported; expression,
   partial and per-column directional ORM indexes are not generated.
-- Scalar projections cannot return NULL. Select an optional field in a tuple.
+- Scalar projections preserve NULL slots. `first` on a nullable scalar returns
+  nil for both a NULL value and no row; project a required key with it to distinguish them.
 - No streaming API, async execution, prepared-statement cache or connection pool.
-- General table rebuilds are not generated. See the
+- Reviewed SQLite rebuilds require `--allow-rebuild` and preserve primary-key
+  identity and compatible data. Lossy casts and unsupported schema objects are
+  rejected; discarding columns still requires `--allow-destructive`. Version 3
+  migration policy is checksummed. See the
   [migration change table](migrations.md#supported-changes-and-explicit-boundaries).
 
 ## Troubleshooting

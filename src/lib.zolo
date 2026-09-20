@@ -78,8 +78,7 @@ impl UpdatePlan {
   }
 }
 
-/// SQL NULL has no bound payload. This also preserves optional fields on the
-/// VM, where a trailing nil in a dynamic array does not retain its arity.
+/// SQL NULL has no bound payload; only non-null values consume parameter slots.
 pub fn bind_value(params: [Any], value: Any) -> str {
   if value == nil { return "NULL" }
   params.push(value)
@@ -111,14 +110,49 @@ pub struct FilterNode {
   pub values: [Any],
 }
 
+struct FilterParts {
+  predicate: Any,
+  params: [Any],
+}
+
+fn collect_filters(filters: FilterNode?) -> FilterParts {
+  let chain: [FilterNode] = []
+  var cursor = filters
+  while cursor != nil {
+    let node = cursor ?? panic("orm: missing predicate link")
+    chain.push(node)
+    cursor = node.previous
+  }
+  let terms: [Any] = []
+  let params: [Any] = []
+  var index = chain.len() - 1
+  while index >= 0 {
+    terms.push(chain[index].predicate)
+    for value in chain[index].values { params.push(value) }
+    index = index - 1
+  }
+  var predicate: Any = nil
+  if terms.len() > 0 { predicate = #{op: "and", terms} }
+  return FilterParts.new(predicate, params)
+}
+
+/// A joined result retains both nominal models. LEFT joins make right optional.
+pub struct Joined<L, R> {
+  pub left: L,
+  pub right: R,
+}
+
 /// Immutable query state, rendered through zolo-sql's structured AST builder.
 pub struct QueryPlan {
   pub table: str,
-  pub columns: [str],
+  pub columns: [Any],
   pub filters: FilterNode? = nil,
   pub ordering: [Any] = [],
   pub take: int = -1,
   pub skip: int = 0,
+  pub alias: str? = nil,
+  pub joins: [Any] = [],
+  pub join_filters: FilterNode? = nil,
 }
 
 impl QueryPlan {
@@ -130,6 +164,9 @@ impl QueryPlan {
       self.ordering,
       self.take,
       self.skip,
+      self.alias,
+      self.joins,
+      self.join_filters,
     )
   }
   fn equal(self, column: str, value: Any) -> QueryPlan {
@@ -143,40 +180,45 @@ impl QueryPlan {
   fn within(self, column: str, values: [Any]) -> QueryPlan {
     return self.filter(#{op: "in", column, count: values.len()}, values)
   }
-  fn order(self, column: str, descending: bool) -> QueryPlan {
+  fn order(self, column: Any, descending: bool) -> QueryPlan {
     let ordering = self.ordering.map(|item| item)
     ordering.push(#{column, descending})
-    return QueryPlan.new(self.table, self.columns, self.filters, ordering, self.take, self.skip)
+    return QueryPlan.new(self.table, self.columns, self.filters, ordering, self.take, self.skip, self.alias, self.joins, self.join_filters)
   }
   fn limit(self, count: int) -> QueryPlan {
     if count < 0 { panic("orm: limit must be non-negative") }
-    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, count, self.skip)
+    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, count, self.skip, self.alias, self.joins, self.join_filters)
   }
   fn offset(self, count: int) -> QueryPlan {
     if count < 0 { panic("orm: offset must be non-negative") }
-    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, count)
+    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, count, self.alias, self.joins, self.join_filters)
   }
-  fn project(self, columns: [str]) -> QueryPlan {
-    return QueryPlan.new(self.table, columns, self.filters, self.ordering, self.take, self.skip)
+  fn project(self, columns: [Any]) -> QueryPlan {
+    return QueryPlan.new(self.table, columns, self.filters, self.ordering, self.take, self.skip, self.alias, self.joins, self.join_filters)
+  }
+  fn join(self, table_name: str, kind: str, column: str, referenced: str, columns: [Any]) -> QueryPlan {
+    if self.joins.len() > 0 { panic("orm: this query already has a relation join") }
+    let join_predicate = #{op: "eq", column: #{table: "orm_l", column}, other: #{table: "orm_r", column: referenced}}
+    let joins: [Any] = [#{kind, table: table_name, alias: "orm_r", on: join_predicate}]
+    return QueryPlan.new(self.table, columns, self.filters, self.ordering, self.take, self.skip, "orm_l", joins)
+  }
+  fn on(self, predicate: Any, values: [Any]) -> QueryPlan {
+    if self.joins.len() != 1 { panic("orm: ON requires one relation join") }
+    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, self.skip,
+      self.alias, self.joins, FilterNode.new(self.join_filters, predicate, values))
   }
   fn try_statement(self, kind: str) -> Result<Statement, OrmError> {
-    let chain: [FilterNode] = []
-    var cursor = self.filters
-    while cursor != nil {
-      let node = cursor ?? panic("orm: missing predicate link")
-      chain.push(node)
-      cursor = node.previous
-    }
-    let terms: [Any] = []
+    let where_parts = collect_filters(self.filters)
+    let on_parts = collect_filters(self.join_filters)
     let bindings: [Any] = []
-    var index = chain.len() - 1
-    while index >= 0 {
-      terms.push(chain[index].predicate)
-      for value in chain[index].values { bindings.push(value) }
-      index = index - 1
+    for value in on_parts.params { bindings.push(value) }
+    for value in where_parts.params { bindings.push(value) }
+    let predicate = where_parts.predicate
+    let joins: [Any] = []
+    for join in self.joins {
+      let join_predicate = if on_parts.predicate == nil { join.on } else { #{op: "and", terms: [join.on, on_parts.predicate]} }
+      joins.push(#{kind: join.kind, table: join.table, alias: join.alias, on: join_predicate})
     }
-    var predicate: Any = nil
-    if terms.len() > 0 { predicate = #{op: "and", terms} }
     var take: int? = nil
     var skip: int? = nil
     var ordering: [Any] = []
@@ -189,6 +231,8 @@ impl QueryPlan {
     let spec = #{
       kind,
       table: self.table,
+      alias: self.alias,
+      joins,
       columns: self.columns,
       predicate,
       order: ordering,
@@ -218,6 +262,7 @@ impl QueryPlan {
 
   /// Unfiltered deletion and pagination on mutations require an explicit decision.
   fn delete(self, db: Database) -> Result<int, OrmError> {
+    if self.joins.len() > 0 { return Result::Err(OrmError::UnsafeMutation("joined queries do not support deletion")) }
     if self.filters == nil {
       return Result::Err(
         OrmError::UnsafeMutation("delete requires a filter; use delete_all explicitly"),
@@ -252,13 +297,6 @@ impl Projection<T> {
     let result: [T] = []
     for row in rows {
       let value = self.decode(row)?
-      if value == nil {
-        return Result::Err(
-          OrmError::Unsupported(
-            "scalar NULL projections require array presence support; select a tuple such as (id, note) to preserve rows",
-          ),
-        )
-      }
       result.push(value)
     }
     return Result::Ok(result)
@@ -400,6 +438,12 @@ fn model_option(decorators, name: str, fallback) {
 }
 
 @comptime
+fn reflected_column(field) -> str {
+  let mapped = model_option(field.decorators, "column", "")
+  return if mapped == "" { field.name } else { mapped }
+}
+
+@comptime
 fn foreign_action(action: str) -> str {
   return match action {
     "" => "NO ACTION",
@@ -463,13 +507,18 @@ fn generated_local(info, stem: str) -> Syntax<.Ident> {
 @comptime
 fn decode_field(field, owner: str) -> Syntax<.Expr> {
   let name = column_name(field)
+  return decode_value(field, owner, quote expr { row[${name}] })
+}
+
+@comptime
+fn decode_value(field, owner: str, input: Syntax<.Expr>) -> Syntax<.Expr> {
   let reader = syntax.ident("read_" + field_kind(field))
-  let value = quote expr { ${reader}(row[${name}], ${field.name}, ${owner})? }
+  let value = quote expr { ${reader}(${input}, ${field.name}, ${owner})? }
   if field.type.is_optional {
     return quote expr {
       {
         var decoded: ${field.type.ref} = nil
-        if row[${name}] != nil { decoded = ${value} }
+        if ${input} != nil { decoded = ${value} }
         decoded
       }
     }
@@ -593,6 +642,15 @@ pub fn Model(info) -> Syntax<.Items> {
     let kind = field_kind(field)
     if !reader_kinds.contains(kind) { reader_kinds.push(kind) }
   }
+  for relation in info.fields.filter(|field| field.opts.belongs_to != "") {
+    let parent = resolve_visible_type(relation.opts.belongs_to)
+    if parent != nil {
+      for field in parent.fields {
+        let kind = field_kind(field)
+        if !reader_kinds.contains(kind) { reader_kinds.push(kind) }
+      }
+    }
+  }
   let reader_imports = reader_kinds.map(
     |kind| {
       let reader = syntax.ident("read_" + kind)
@@ -613,9 +671,10 @@ pub fn Model(info) -> Syntax<.Items> {
   let schema_readers = info.fields.map(
     |field| {
       let reader = syntax.ident("read_" + field.name)
-      let value = decode_field(field, info.name)
+      let value = decode_value(field, info.name, quote expr { row[column] })
+      let column = column_name(field)
       return quote member {
-      pub fn ${reader}(row: Any) -> Result<${field.type.ref}, OrmError> {
+      pub fn ${reader}(row: Any, column: str = ${column}) -> Result<${field.type.ref}, OrmError> {
         return Result::Ok(${value})
       }
     }
@@ -725,6 +784,177 @@ pub fn Model(info) -> Syntax<.Items> {
     }
     },
   )
+  let join_items = []
+  let join_methods = []
+  let join_readers = []
+  for relation in info.fields.filter(|field| field.opts.belongs_to != "") {
+    let parent = resolve_visible_type(relation.opts.belongs_to)
+    // A loader can accept plain parent records. SQL joins require model key metadata.
+    if parent != nil && parent.kind == "struct" {
+      let parent_keys = parent.fields.filter(|field| model_option(field.decorators, "primary_key", false))
+      if parent_keys.len() == 1 {
+        let parent_key = parent_keys[0]
+        if parent_key.type.is_optional { panic("orm: joined model primary key cannot be optional") }
+        let references = parent.fields.filter(|field| field.name == relation.opts.references)
+        if references.len() != 1 { panic("orm: unknown joined reference field: " + relation.opts.references) }
+        if field_kind(references[0]) != field_kind(relation) { panic("orm: joined fields require matching scalar types") }
+        let parent_type = syntax.ident(relation.opts.belongs_to)
+        let configured_table = model_option(parent.decorators, "table", "")
+        let parent_table = if configured_table == "" { parent.name.lower() } else { configured_table }
+        let reference_column = reflected_column(references[0])
+        let view_name = "__OrmJoin_{info.name.len()}_" + info.name + "_" + relation.name + "_Schema"
+        let view_type = syntax.ident(view_name)
+        let view_fields = parent.fields.map(|field| {
+          let column = reflected_column(field)
+          return quote member {
+            @sql_column(name: ${column})
+            pub ${field.member}: ${field.type.ref},
+          }
+        })
+        var reader_prefix = "__orm_join_{relation.name.len()}_" + relation.name + "_read_"
+        while info.fields.filter(|field| field.name.starts_with(reader_prefix)).len() > 0 {
+          reader_prefix = "_" + reader_prefix
+        }
+        let view_readers = parent.fields.map(|field| {
+          let reader = syntax.ident(reader_prefix + field.name)
+          let column = reflected_column(field)
+          let value = decode_value(field, parent.name, quote expr { row[column] })
+          return quote member {
+            pub fn ${reader}(row: Any, column: str = ${column}) -> Result<${field.type.ref}, OrmError> {
+              return Result::Ok(${value})
+            }
+          }
+        })
+        // Dedicated output aliases distinguish equal/mapped names and self joins.
+        let joined_columns = []
+        let left_copy = []
+        let right_copy = []
+        var ordinal = 0
+        for field in info.fields {
+          let column = column_name(field)
+          let alias = "__orm_left_{ordinal}"
+          joined_columns.push(quote expr { #{table: "orm_l", column: ${column}, alias: ${alias}} })
+          left_copy.push(quote stmt { left_row[${column}] = row[${alias}] })
+          ordinal = ordinal + 1
+        }
+        ordinal = 0
+        var presence_alias = ""
+        for field in parent.fields {
+          let column = reflected_column(field)
+          let alias = "__orm_right_{ordinal}"
+          joined_columns.push(quote expr { #{table: "orm_r", column: ${column}, alias: ${alias}} })
+          right_copy.push(quote stmt { right_row[${column}] = row[${alias}] })
+          if field.name == parent_key.name { presence_alias = alias }
+          ordinal = ordinal + 1
+        }
+        join_items.push(quote items {
+          @sql_schema(table: ${parent_table}, source: ${relation.opts.belongs_to}, query_only: true)
+          pub struct ${view_type} { ${..view_fields} }
+        })
+        for reader in view_readers { join_readers.push(reader) }
+        for mode in ["inner", "left"] {
+          let optional = mode == "left"
+          let joined_name = "__OrmJoin_{info.name.len()}_" + info.name + "_" + relation.name + "_" + mode
+          let joined_type = syntax.ident(joined_name)
+          let method = syntax.ident(mode + "_join_" + relation.name)
+          let right_type = if optional { quote type { ${parent_type}? } } else { quote type { ${parent_type} } }
+          let row_type = if optional { quote type { ${view_type}? } } else { quote type { ${view_type} } }
+          let read_right = if optional {
+            quote stmt {
+              var right: ${parent_type}? = nil
+              if row[${presence_alias}] != nil { right = ${parent_type}::from_row(right_row)? }
+            }
+          } else { quote stmt { let right = ${parent_type}::from_row(right_row)? } }
+          let ordering = []
+          for field in info.fields {
+            let order = syntax.ident("order_by_left_" + field.name)
+            let column = column_name(field)
+            ordering.push(quote member {
+              pub fn ${order}(self, descending: bool = false) -> ${joined_type} {
+                return ${joined_type}.new(self.plan.order(#{table: "orm_l", column: ${column}}, descending))
+              }
+            })
+          }
+          for field in parent.fields {
+            let order = syntax.ident("order_by_right_" + field.name)
+            let column = reflected_column(field)
+            ordering.push(quote member {
+              pub fn ${order}(self, descending: bool = false) -> ${joined_type} {
+                return ${joined_type}.new(self.plan.order(#{table: "orm_r", column: ${column}}, descending))
+              }
+            })
+          }
+          join_methods.push(quote member {
+            pub fn ${method}(self) -> ${joined_type} {
+              return ${joined_type}.new(self.plan.join(${parent_table}, ${mode}, ${column_name(relation)}, ${reference_column}, [${..joined_columns}]))
+            }
+          })
+          join_items.push(quote items {
+            @sql_query(sources: [
+              #{schema: ${schema_name}, alias: "orm_l", reader_type: ${info.name}},
+              #{schema: ${view_name}, alias: "orm_r", reader_type: ${info.name}, reader: ${reader_prefix}, nullable: ${optional}, presence: ${parent_key.name}},
+            ], filter: "filter_plan", select: "project", on: "on_plan")
+            pub struct ${joined_type} { pub plan: QueryPlan, }
+            impl ${joined_type} {
+              ${..ordering}
+              pub fn on(self, predicate: fn(${schema_type}, ${view_type}) -> bool) -> ${joined_type} {
+                let _ = self
+                let _ = predicate
+                panic("orm: join expression was not compiled")
+              }
+              pub fn filter(self, predicate: fn(${schema_type}, ${row_type}) -> bool) -> ${joined_type} {
+                let _ = self
+                let _ = predicate
+                panic("orm: joined filter was not compiled")
+              }
+              pub fn select<R>(self, projection: fn(${schema_type}, ${row_type}) -> R) -> Projection<R> {
+                let _ = self
+                let _ = projection
+                panic("orm: joined projection was not compiled")
+              }
+              pub fn on_plan(self, predicate: Any, bindings: [Any]) -> ${joined_type} {
+                return ${joined_type}.new(self.plan.on(predicate, bindings))
+              }
+              pub fn filter_plan(self, predicate: Any, bindings: [Any]) -> ${joined_type} {
+                return ${joined_type}.new(self.plan.filter(predicate, bindings))
+              }
+              pub fn project<R>(self, columns: [Any], decode: fn(Any) -> Result<R, OrmError>) -> Projection<R> {
+                return Projection.new(self.plan.project(columns), decode)
+              }
+              pub fn statement(self) -> Statement { return self.plan.select() }
+              pub fn try_statement(self) -> Result<Statement, OrmError> { return self.plan.try_statement("select") }
+              pub fn limit(self, count: int) -> ${joined_type} { return ${joined_type}.new(self.plan.limit(count)) }
+              pub fn offset(self, count: int) -> ${joined_type} { return ${joined_type}.new(self.plan.offset(count)) }
+              pub fn count(self, db: Database) -> Result<int, OrmError> { return self.plan.count(db) }
+              pub fn exists(self, db: Database) -> Result<bool, OrmError> { return self.plan.exists(db) }
+              pub fn all(self, db: Database) -> Result<[Joined<${info.ref}, ${right_type}>], OrmError> {
+                let statement = self.try_statement()?
+                let rows = statement.query(db)?
+                let result: [Joined<${info.ref}, ${right_type}>] = []
+                for row in rows {
+                  let left_row: Any = #{}
+                  let right_row: Any = #{}
+                  ${..left_copy}
+                  ${..right_copy}
+                  let left = ${info.ref}::from_row(left_row)?
+                  ${read_right}
+                  result.push(Joined.new(left, right))
+                }
+                return Result::Ok(result)
+              }
+              pub fn first(self, db: Database) -> Result<Joined<${info.ref}, ${right_type}>?, OrmError> {
+                if self.plan.take == 0 { return Result::Ok(nil) }
+                let rows = self.limit(1).all(db)?
+                if rows.len() == 0 { return Result::Ok(nil) }
+                return Result::Ok(rows[0])
+              }
+            }
+          })
+        }
+      }
+    }
+  }
+  let join_import = if join_items.len() > 0 { quote items { use orm::Joined } } else { quote items {} }
   let relation_import = if relations.len() > 0 { quote items { use orm::Related } } else {
     quote items {}
   }
@@ -849,7 +1079,9 @@ pub fn Model(info) -> Syntax<.Items> {
     use orm::bind_value as ${binder_alias}
     use orm::Statement as ${statement_alias}
     ${relation_import}
+    ${join_import}
     ${..reader_imports}
+    ${..join_items}
     use std::database::Database
     @sql_schema(table: ${table_name}, source: ${info.name}, ddl: ${ddl})
     pub struct ${schema_type} {
@@ -902,6 +1134,7 @@ pub fn Model(info) -> Syntax<.Items> {
     impl ${query} {
       ${..query_methods}
       ${..comparisons}
+      ${..join_methods}
       pub fn filter(self, predicate: fn(${schema_type}) -> bool) -> ${query} {
         let _ = self
         let _ = predicate
@@ -915,7 +1148,7 @@ pub fn Model(info) -> Syntax<.Items> {
       pub fn filter_plan(self, predicate: Any, bindings: [Any]) -> ${query} {
         return ${query}.new(self.plan.filter(predicate, bindings))
       }
-      pub fn project<R>(self, columns: [str], decode: fn(Any) -> Result<R, OrmError>) -> Projection<R> {
+      pub fn project<R>(self, columns: [Any], decode: fn(Any) -> Result<R, OrmError>) -> Projection<R> {
         return Projection.new(self.plan.project(columns), decode)
       }
       pub fn limit(self, count: int) -> ${query} { return ${query}.new(self.plan.limit(count)) }
@@ -948,6 +1181,7 @@ pub fn Model(info) -> Syntax<.Items> {
     }
     impl ${info.ref} {
       ${..schema_readers}
+      ${..join_readers}
       pub fn query() -> ${query} { return ${query}.new(QueryPlan.new(${table_name}, [${..column_names}])) }
       pub fn changes() -> ${changes} { return ${changes}.new(UpdatePlan.new()) }
       ${..relations}

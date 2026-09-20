@@ -1,0 +1,165 @@
+//! Relation joins preserve mapped columns, nullable right rows and bound values.
+use std::database::Database
+use orm::{Model, OrmError}
+use join_parents::Department
+use join_facade::Employee as Worker
+
+@derive(Model)
+@model(table: "join_nodes")
+struct Node {
+  @model(primary_key: true)
+  id: int,
+  name: str,
+  @model(belongs_to: "Node", column: "parent_key")
+  parent_id: int?,
+}
+
+fn exercise_self_joins(db: Database) -> Result<int, OrmError> {
+  Node { id: 1, name: "Root", parent_id: nil }.insert(db)?
+  Node { id: 2, name: "Child", parent_id: 1 }.insert(db)?
+  let nodes = Node::query().left_join_parent_id().order_by_left_id().all(db)?
+  assert(nodes[0].right == nil, "root has no parent")
+  assert(nodes[1].left.name == "Child" && nodes[1].right?.name == "Root", "self join decodes both rows")
+  let names = Node::query().inner_join_parent_id().select(|child, parent| (child.name, parent.name)).all(db)?
+  assert(names[0][0] == "Child" && names[0][1] == "Root", "self join projects both names")
+  return Result::Ok(1)
+}
+
+fn exercise_nullable_join_projection(db: Database) -> Result<int, OrmError> {
+  let department_names: [str?] = Worker::query().order_by_id().left_join_department_id().select(|worker, department| department?.name).all(db)?
+  assert(department_names.len() == 4)
+  assert(department_names[0] == "Engineering" && department_names[2] == nil && department_names[3] == nil)
+  return Result::Ok(1)
+}
+
+fn exercise_joins() -> Result<int, OrmError> {
+  let db = Database.open("sqlite://:memory:").map_err(|error| OrmError::Database(error))?
+  defer db.close()
+  Department::create_table(db)?
+  Worker::create_table(db)?
+  Node::create_table(db)?
+  let engineering = Department::create(db, name: "Engineering", note: nil)?
+  let sales = Department::create(db, name: "Sales", note: "present")?
+  Worker::create(db, name: "Ada", department_id: engineering.id)?
+  Worker::create(db, name: "Grace", department_id: sales.id)?
+  Worker::create(db, name: "No department", department_id: nil)?
+  Worker::create(db, name: "Orphan", department_id: 999)?
+  let base = Worker::query().order_by_id()
+  let left = base.left_join_department_id()
+  let inner = base.inner_join_department_id()
+  assert(base.count(db)? == 4, "base query remains reusable")
+  assert(left.count(db)? == 4, "left join retains every worker")
+  assert(inner.count(db)? == 2, "inner join keeps matched workers")
+  let rows = left.all(db)?
+  assert(rows.len() == 4, "left join preserves row count")
+  assert(rows[0].left.name == "Ada", "left model uses mapped columns")
+  assert(rows[0].right?.name == "Engineering", "right model uses mapped columns")
+  assert(rows[0].right?.note == nil, "matched SQL NULL does not use the application default")
+  assert(rows[2].right == nil && rows[3].right == nil, "NULL and orphan keys produce an absent right row")
+  let projected = left.select(|worker, department| (worker.name, department?.name, department?.note)).all(db)?
+  assert(projected.len() == 4, "tuple projection preserves every joined row")
+  assert(projected[0][0] == "Ada" && projected[0][1] == "Engineering" && projected[0][2] == nil, "tuple projection preserves matched optional fields")
+  assert(projected[3][0] == "Orphan" && projected[3][1] == nil, "tuple projection preserves absent right values")
+  exercise_nullable_join_projection(db)?
+  assert(left.filter(|worker, department| department?.id != nil).count(db)? == 2, "right primary key identifies matches")
+  assert(left.filter(|worker, department| department?.note == nil).count(db)? == 3, "optional field NULL also matches absent rows")
+  let prefix = "Eng"
+  let minimum = 0
+  let scoped = Worker::query().filter(|worker| worker.id > minimum)
+    .left_join_department_id().on(|worker, department| department.name.starts_with(prefix))
+    .order_by_left_id()
+  let statement = scoped.statement()
+  assert(statement.params.len() == 2, "ON and WHERE both bind parameters")
+  assert(statement.params[0] == "Eng%" && statement.params[1] == 0, "ON bindings precede WHERE bindings")
+  assert(!statement.text.contains("Eng"), "captured values stay outside SQL text")
+  let scoped_rows = scoped.all(db)?
+  assert(scoped_rows.len() == 4 && scoped_rows[0].right != nil && scoped_rows[1].right == nil, "ON predicate preserves unmatched left rows")
+  assert(left.limit(0).exists(db)?, "exists ignores limit zero")
+  assert(left.limit(0).count(db)? == 4, "count ignores limit zero")
+  let page = left.limit(1).offset(2).first(db)? ?? panic("expected one page row")
+  assert(page.left.name == "No department", "pagination applies after joining")
+  assert(left.limit(0).first(db)? == nil, "first honors limit zero")
+  assert(left.count(db)? == 4, "pagination does not mutate the reusable query")
+  let last = Worker::query().inner_join_department_id().order_by_right_name(true).first(db)? ?? panic("expected inner row")
+  assert(last.right.name == "Sales", "right-side ordering uses mapped columns")
+  exercise_self_joins(db)?
+  print("orm typed joins: ok")
+  return Result::Ok(1)
+}
+
+@test
+fn typed_relation_joins() { exercise_joins().unwrap() }
+
+exercise_joins().unwrap()
+
+fn expect_join_decode<T>(result: Result<T, OrmError>) {
+  match result {
+    .Err(error) => match error {
+      .FieldDecode(details) => {
+        assert(details.model == "Department")
+        assert(details.field == "name")
+      },
+      _ => panic("joined decode must retain field context"),
+    },
+    _ => panic("malformed joined row was accepted"),
+  }
+}
+
+fn exercise_join_decode_errors() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  // Deliberately emulate a legacy table that permits an invalid required value.
+  db.execute("CREATE TABLE join_departments (department_key INTEGER PRIMARY KEY, display_name TEXT, note TEXT)").unwrap()
+  Worker::create_table(db).unwrap()
+  db.execute("INSERT INTO join_departments VALUES (1, NULL, NULL)").unwrap()
+  Worker::create(db, name: "Legacy", department_id: 1).unwrap()
+  let joined = Worker::query().left_join_department_id()
+  assert(joined.exists(db).unwrap())
+  assert(joined.count(db).unwrap() == 1)
+  expect_join_decode(joined.all(db))
+  expect_join_decode(joined.select(|worker, department| (worker.name, department?.name)).all(db))
+}
+
+@test
+fn joined_decode_errors() { exercise_join_decode_errors() }
+
+exercise_join_decode_errors()
+
+// These logical names used to collide when relation and field were simply joined.
+@derive(Model)
+@model(table: "join_reader_parent")
+struct ReaderParent {
+  @model(primary_key: true)
+  id: int,
+  c: str,
+  b_read_c: str,
+}
+
+@derive(Model)
+@model(table: "join_reader_child")
+struct ReaderChild {
+  @model(primary_key: true)
+  id: int,
+  @model(belongs_to: "ReaderParent")
+  a_read_b: int,
+  @model(belongs_to: "ReaderParent")
+  a: int,
+}
+
+fn exercise_reader_names() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  ReaderParent::create_table(db).unwrap()
+  ReaderChild::create_table(db).unwrap()
+  ReaderParent { id: 1, c: "first", b_read_c: "second" }.insert(db).unwrap()
+  ReaderChild { id: 1, a_read_b: 1, a: 1 }.insert(db).unwrap()
+  let first = ReaderChild::query().inner_join_a_read_b().select(|child, parent| parent.c).all(db).unwrap()
+  let second = ReaderChild::query().inner_join_a().select(|child, parent| parent.b_read_c).all(db).unwrap()
+  assert(first[0] == "first")
+  assert(second[0] == "second")
+}
+
+@test
+fn generated_join_readers_have_distinct_names() { exercise_reader_names() }
+
+exercise_reader_names()

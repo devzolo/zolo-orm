@@ -91,9 +91,10 @@ uses. The package adds no driver or native plugin of its own.
 `Database` compiles the statement itself and caches the compiled SQL by text
 and dialect within fixed limits. Bound values and connections are never cached.
 
-Optional values are bound as SQL `NULL` tokens rather than as nil array
-elements, because the VM's binding arrays drop a trailing nil. Identifiers are
-validated at compile time and always quoted.
+Optional writes use SQL `NULL` tokens without consuming a bound parameter.
+Identifiers are validated at compile time and always quoted. Projection arrays
+keep presence separately from values, so SQL NULL occupies a real element
+through the VM, native/LLVM runtimes and plugin bridges.
 
 ## Creation, patches and decoding
 
@@ -174,8 +175,7 @@ and never runs when a field is accessed, which rules out hidden N+1 queries.
   model.
 - `OrmError.UnsafeMutation` rejects deletes that are ambiguous: no filter, or a
   filter combined with ordering or pagination.
-- `OrmError.Unsupported` reports scalar NULL projections and runtimes without
-  database support.
+- `OrmError.Unsupported` reports runtimes without database support.
 
 Invalid model declarations are compile errors. Invalid pagination or batch
 configuration is treated as a programmer error.
@@ -190,3 +190,24 @@ the same protocol; nothing in the compiler is tied to a package named `orm`.
 
 The `zolo db` commands consume the same metadata to generate migrations, so
 typed queries and the migration history are derived from a single source.
+
+## Relation query sources
+
+Generated INNER/LEFT queries opt into the generic `sql_query(sources: [...])`
+protocol. Each source names a typed schema, SQL alias and exported reader
+methods. Nullable sources additionally name a required presence field. LEFT
+projection decoders select this field under an internal alias to distinguish
+an absent row from a malformed matched row. Readers accept the selected column
+alias while preserving the original model/field error context.
+
+A relation view uses `sql_schema(query_only: true)`. Its columns participate
+in query validation and editor tooling, but it contributes no physical table
+or DDL to migration discovery. The compiler does not depend on this package's
+name. Imported projections call reader methods on the real exported model,
+never the synthetic schema names used only during analysis.
+
+`QueryPlan` stores relation predicates and WHERE filters independently.
+The shared SQL AST builder quotes source aliases and column identifiers
+separately, renders ON before WHERE, and emits placeholders in that order.
+Count and existence retain the joined relation while discarding ordering and
+pagination. A joined mutation is rejected rather than inferred.

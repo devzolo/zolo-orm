@@ -115,3 +115,11 @@ compile-fail fixtures. The backend suite includes the walkthroughs and selected
 regression examples on native/LLVM. The migration demo is validated separately
 through its documented CLI workflow. Benchmark results live in
 `target/benchmarks/`; they are measurements, not pass/fail examples.
+
+### Typed joins
+
+Run `zolo run joins.zolo` to exercise INNER/LEFT relation joins with mapped
+columns, imports and reexports, self joins, ON/WHERE bindings, pagination and
+decode errors. Expected output includes `orm typed joins: ok`.
+
+Optional scalar projections preserve NULL positions; see [nullable projections](nullable_projections.zolo).

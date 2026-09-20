@@ -4,8 +4,9 @@ Typed SQLite models and queries for Zolo, generated from ordinary structs.
 
 Declare a model once, then use typed creation, partial updates, atomic upserts,
 query projections and explicit relation loading. The same metadata produces
-indexes, foreign keys and migrations. Field names and value types are checked
-by the compiler; query values are bound separately from SQL.
+indexes, foreign keys, typed INNER/LEFT joins and migrations. Field names and
+value types are checked by the compiler; query values are bound separately
+from SQL. Optional scalar projections preserve NULL positions.
 
 [Get started](docs/getting-started.md) · [Documentation](docs/README.md) ·
 [Runnable examples](examples/README.md) · [Architecture](ARCHITECTURE.md)
@@ -103,6 +104,8 @@ the local ORM source. See [setup and compatibility](docs/errors-and-compatibilit
 | Insert or update a unique record | [Atomic upserts](docs/models-and-writes.md#atomic-upserts) | [upsert.zolo](examples/upsert.zolo) |
 | Filter, project, page or require a row | [Queries](docs/queries.md) | [required_reads.zolo](examples/required_reads.zolo) |
 | Save related rows and load their children | [Relations and transactions](docs/relations-and-transactions.md) | [relationships.zolo](examples/relationships.zolo) |
+| Read nullable scalar values without losing rows | [Projections](docs/queries.md#projections) | [nullable_projections.zolo](examples/nullable_projections.zolo) |
+| Join related models in a typed query | [INNER and LEFT joins](docs/queries.md#typed-relation-joins) | [joins.zolo](examples/joins.zolo) |
 | Evolve a persistent database | [Migrations](docs/migrations.md) | [Migration project](examples/migration_demo/README.md) |
 | Handle duplicate keys and rollback | [Errors](docs/errors-and-compatibility.md#errors) | [error_handling.zolo](examples/error_handling.zolo) |
 
@@ -114,7 +117,7 @@ loader is explicit; `foreign_key: true` additionally enforces integrity.
 SQLite execution is supported on VM, native and LLVM backends.
 Other dialect rendering does not imply database-driver support. Review the
 [capability table and current boundaries](docs/errors-and-compatibility.md#compatibility)
-for NULL projections, joins, codecs and WebAssembly.
+for NULL projections, more complex joins, codecs and WebAssembly.
 
 ## Development
 

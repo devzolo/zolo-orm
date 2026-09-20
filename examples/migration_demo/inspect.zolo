@@ -1,0 +1,12 @@
+//! Read-only assertion: rebuild and rollback must preserve the existing demo row.
+use std::database::Database
+use models::Note
+
+let db = Database.open("sqlite://tutorial.db").unwrap()
+defer db.close()
+let note = Note::find_or_error(db, 1).unwrap()
+assert(note.id == 1)
+assert(note.title == "First note")
+assert(note.body == "Created after migration")
+assert(Note::query().count(db).unwrap() == 1)
+print("migration data preserved: ok")

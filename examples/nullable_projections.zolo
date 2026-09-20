@@ -1,0 +1,64 @@
+//! SQL NULL remains a present scalar projection element, including at either end.
+use std::database::Database
+use orm::Model
+
+@derive(Model)
+@model(table: "nullable_readings")
+struct Reading {
+  @model(primary_key: true)
+  id: int,
+  label: str?,
+  count: int?,
+  enabled: bool?,
+  ratio: float?,
+}
+
+fn exercise_nullable_projections() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  Reading::create_table(db).unwrap()
+  Reading::insert_many(db, [
+    Reading.new(1, nil, nil, nil, nil),
+    Reading.new(2, "present", 0, false, 0.5),
+    Reading.new(3, nil, nil, nil, nil),
+    Reading.new(4, "last value", 9, true, 1.5),
+    Reading.new(5, nil, nil, nil, nil),
+  ]).unwrap()
+  let query = Reading::query().order_by_id()
+  let labels: [str?] = query.select(|reading| reading.label).all(db).unwrap()
+  let counts: [int?] = query.select(|reading| reading.count).all(db).unwrap()
+  let flags: [bool?] = query.select(|reading| reading.enabled).all(db).unwrap()
+  let ratios: [float?] = query.select(|reading| reading.ratio).all(db).unwrap()
+  assert(labels.len() == 5 && counts.len() == 5 && flags.len() == 5 && ratios.len() == 5)
+  assert(labels[0] == nil && labels[1] == "present" && labels[2] == nil)
+  assert(labels[3] == "last value" && labels[4] == nil)
+  assert(counts[0] == nil && (counts[1] ?? -1) == 0 && (counts[3] ?? -1) == 9 && counts[4] == nil)
+  assert(flags[0] == nil && flags[1] == false && flags[3] == true && flags[4] == nil)
+  assert(ratios[0] == nil && (ratios[1] ?? -1.0) ~= 0.5 && (ratios[3] ?? -1.0) ~= 1.5 && ratios[4] == nil)
+  var slots = 0
+  var missing = 0
+  for label in labels {
+    slots += 1
+    if label == nil { missing += 1 }
+  }
+  assert(slots == 5 && missing == 3)
+  let only_null: [str?] = query.filter(|reading| reading.label == nil).select(|reading| reading.label).all(db).unwrap()
+  assert(only_null.len() == 3)
+  for label in only_null { assert(label == nil) }
+  let empty: [str?] = query.filter(|reading| reading.id < 0).select(|reading| reading.label).all(db).unwrap()
+  assert(empty.len() == 0)
+  let page: [str?] = query.select(|reading| reading.label).limit(3).offset(2).all(db).unwrap()
+  assert(page.len() == 3 && page[0] == nil && page[1] == "last value" && page[2] == nil)
+  // first returns T?: a NULL scalar and no row both produce nil. Use a tuple
+  // containing a required key when callers need to distinguish those outcomes.
+  assert(query.select(|reading| reading.label).first(db).unwrap() == nil)
+  let present_row = query.select(|reading| (reading.id, reading.label)).first(db).unwrap()
+    ?? panic("expected the row whose label is NULL")
+  assert(present_row[0] == 1 && present_row[1] == nil)
+}
+
+@test
+fn nullable_scalar_projections_keep_every_row() { exercise_nullable_projections() }
+
+exercise_nullable_projections()
+print("orm nullable projections: ok")

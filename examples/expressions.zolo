@@ -51,15 +51,10 @@ assert(optional_rows.len() == 3)
 assert(optional_rows[0][1] == nil)
 assert(optional_rows[1][1] == nil)
 assert(optional_rows[2][1] == "note")
-// Current VM arrays cannot preserve scalar nil slots. Reject instead of dropping rows.
-let scalar_nulls = Person::query().order_by_id().select(|p| p.note).all(db)
-match scalar_nulls {
-  .Err(error) => match error {
-    .Unsupported(message) => assert(message.contains("scalar NULL")),
-    _ => panic("expected scalar NULL capability error"),
-  },
-  _ => panic("scalar NULL rows must not be silently dropped"),
-}
+// NULL is a present scalar slot, so projection length still equals row count.
+let scalar_nulls: [str?] = Person::query().order_by_id().select(|p| p.note).all(db).unwrap()
+assert(scalar_nulls.len() == 3)
+assert(scalar_nulls[0] == nil && scalar_nulls[1] == nil && scalar_nulls[2] == "note")
 // Builder limits are recoverable through every execution path.
 let excessive_keys: [int] = []
 for key in 0..16385 { excessive_keys.push(key) }

@@ -1,0 +1,15 @@
+use orm::Model
+@derive(Model)
+struct Parent {
+  @model(primary_key: true)
+  id: int,
+  name: str,
+}
+@derive(Model)
+struct Child {
+  @model(primary_key: true)
+  id: int,
+  @model(belongs_to: "Parent")
+  parent_id: int?,
+}
+let q = Child::query().left_join_parent_id().filter(|child, parent| child.id == "wrong")

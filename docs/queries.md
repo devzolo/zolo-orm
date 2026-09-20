@@ -83,9 +83,71 @@ and each value goes through the field's typed decoder.
 let pairs = User::query().select(|u| (u.id, u.email)).all(db)?
 ```
 
-Select optional fields as part of a tuple. A scalar projection whose value is
-NULL returns `OrmError.Unsupported`, because Zolo arrays cannot yet hold a nil
-slot; rows are never dropped silently.
+Optional scalar projections return arrays such as `[str?]`. SQL NULL is a
+present `nil` element: leading, middle and trailing NULL values retain their
+positions, including when every value is NULL. An empty result is `[]`.
+
+`first(db)` returns `T?`, so a NULL scalar and no row both produce `nil`.
+Select a tuple containing a required key, such as `(user.id, user.note)`, when
+the caller needs to distinguish those outcomes. See
+[nullable_projections.zolo](../examples/nullable_projections.zolo).
+
+## Typed relation joins
+
+A `belongs_to` field generates one INNER and one LEFT join method when its
+target is a model with a nonoptional primary key. The method uses the logical
+field name. For `@model(belongs_to: "Department") department_id: int?`:
+
+```rust
+let rows = Worker::query()
+  .left_join_department_id()
+  .filter(|worker, department| worker.id >= minimum && department?.name != nil)
+  .select(|worker, department| (worker.name, department?.name))
+  .all(db)?
+```
+
+The two lambda parameters identify the two sources independently. Mapped SQL
+names are resolved from model metadata and each source receives its own SQL
+alias, including self joins. INNER exposes a required right schema; LEFT
+exposes an optional right schema, so use `department?.name`. A required access
+such as `department.name` in a LEFT filter or projection is a compile error.
+
+Without `select`, `all` returns `[Joined<Worker, Department>]` for INNER and
+`[Joined<Worker, Department?>]` for LEFT, wrapped in `Result`. Each item has
+`left` and `right`. LEFT identifies an absent row by the right model's
+nonoptional primary key. A matched row with a nullable field remains a real
+model, and malformed required fields still return a decoding error.
+
+Add conditions to the relationship's ON clause with `on`:
+
+```rust
+let prefix = "Eng"
+let workers = Worker::query()
+  .left_join_department_id()
+  .on(|worker, department| department.name.starts_with(prefix))
+  .order_by_left_id()
+  .all(db)?
+```
+
+An ON predicate runs before LEFT produces absent right rows, so both parameters
+are required there. A WHERE predicate added with `filter` runs after that step.
+Filtering right columns in WHERE can remove unmatched rows; filtering them in
+ON preserves the left rows. Both support compatible column-to-column comparisons
+and captured scalar values. Parameters are bound in statement order: ON first,
+then WHERE, preserving the order within each clause.
+
+Use `order_by_left_FIELD` and `order_by_right_FIELD` to choose a source.
+Ordering calls append criteria. Filters, ordering and pagination applied before
+the join remain part of the resulting query; pagination is applied to joined
+rows, without introducing a hidden subquery. `count` counts joined rows and
+`exists` probes that same relation, both ignoring pagination and ordering.
+No implicit distinct count is added.
+
+This release supports one `belongs_to` relation join per query. It does not
+expose arbitrary join conditions in place of the relation key, chained joins,
+joined mutations, computed projections, or RIGHT/FULL joins. For those queries,
+use explicit SQL. See [joins.zolo](../examples/joins.zolo) for imports, reexports,
+self joins, bound ON conditions and decoding failures.
 
 ## Deleting
 
@@ -113,7 +175,7 @@ print(statement.text) // SELECT 1 AS "orm_exists" FROM ... WHERE ... LIMIT 1
 ```
 
 `plan.exists(db)` executes the same existence plan. Bound values stay separate
-from SQL, in the order their filters were added.
+from SQL. For joined queries ON bindings precede WHERE bindings; each clause preserves filter order.
 
 ## Raw SQL
 
@@ -140,10 +202,10 @@ let total = active.count(db)?
 
 Each builder call returns a new query. Here `active` stays reusable and
 `total` counts all active users, not the page. Use deterministic ordering when
-paging. Joins and computed projections are not generated.
+paging. Relation joins are described above; computed projections are not generated.
 
-Select optional fields in a tuple such as `(user.id, user.note)` when rows can
-contain NULL. This keeps the row present without requiring a nil slot in a
-scalar array.
+Scalar and tuple projections preserve NULL values and row count. Optional
+fields retain their optional types, including fields from the right side of a
+LEFT join; assigning `[str?]` to `[str]` is a compile error.
 
 Next: [absence and database errors](errors-and-compatibility.md#errors).

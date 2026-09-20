@@ -103,3 +103,12 @@ For mapped parent keys, aliases, SET NULL, SET DEFAULT and restrictive actions,
 continue with [foreign_keys.zolo](../examples/foreign_keys.zolo).
 For a recoverable failure that rolls back related work, see
 [error_handling.zolo](../examples/error_handling.zolo).
+
+## Read related models in one query
+
+A model relationship also exposes `inner_join_FIELD()` and `left_join_FIELD()`
+on the child query. Use them when filtering or selecting fields from both
+models in the database; the existing loader remains useful for grouped child
+collections. LEFT returns an optional `right` model and requires optional
+field access in captured filters and projections. See [typed joins](queries.md#typed-relation-joins)
+and the executable [joins example](../examples/joins.zolo).
