@@ -32,7 +32,7 @@ run_step(sh"{zolo} check src/lib.zolo".cwd(root), "check src/lib.zolo")
 run_step(sh"{zolo} install".cwd(examples), "install examples")
 let runnable = [
     "basic", "upsert", "relationships", "integration", "dx", "dx_imports",
-    "expressions", "hygiene", "required_reads", "error_handling", "schema_writes", "foreign_keys", "relations", "query_plan", "joins", "nullable_projections",
+    "expressions", "hygiene", "required_reads", "error_handling", "schema_writes", "foreign_keys", "relations", "query_plan", "joins", "nullable_projections", "typed_relations",
 ]
 for example in runnable {
     run_step(sh"{zolo} run {example}.zolo --no-cache".cwd(examples), "run {example}.zolo")
@@ -44,10 +44,20 @@ run_step(sh"{zolo} test error_handling.zolo".cwd(examples), "test error_handling
 run_step(sh"{zolo} test schema_writes.zolo".cwd(examples), "test schema_writes.zolo")
 run_step(sh"{zolo} test foreign_keys.zolo".cwd(examples), "test foreign_keys.zolo")
 run_step(sh"{zolo} test joins.zolo".cwd(examples), "test joins.zolo")
+run_step(sh"{zolo} test typed_relations.zolo".cwd(examples), "test typed_relations.zolo")
 run_step(sh"{zolo} test nullable_projections.zolo".cwd(examples), "test nullable_projections.zolo")
 
 run_step(sh"{zolo} install".cwd(tests), "install tests")
 let cases = [
+    CompileFail { file: "foreign_no_action_without_key.zolo", patterns: ["actions require foreign_key"] },
+    CompileFail { file: "relation_string_target.zolo", patterns: ["TE217.*TypeRef"] },
+    CompileFail { file: "relation_string_field.zolo", patterns: ["TE217.*FieldRef"] },
+    CompileFail { file: "relation_string_action.zolo", patterns: ["TE217.*ForeignKeyAction"] },
+    CompileFail { file: "relation_wrong_owner.zolo", patterns: ["references field must belong"] },
+    CompileFail { file: "relation_reference_without_target.zolo", patterns: ["references requires belongs_to"] },
+    CompileFail { file: "relation_value_target.zolo", patterns: ["TE217.*instance"] },
+    CompileFail { file: "relation_wrong_enum.zolo", patterns: ["TE217.*ForeignKeyAction"] },
+    CompileFail { file: "relation_missing_default_field.zolo", patterns: ["relation target has no id field"] },
     CompileFail { file: "join_required_right_access.zolo", patterns: ["requires optional field"] },
     CompileFail { file: "join_unknown_field.zolo", patterns: ["unknown SQL row field"] },
     CompileFail { file: "join_wrong_column_type.zolo", patterns: ["matching scalar types"] },
@@ -88,11 +98,11 @@ let cases = [
     CompileFail { file: "upsert_index_collision.zolo", patterns: ["generated upsert method collision"] },
     CompileFail { file: "foreign_key_without_model.zolo", patterns: ["foreign_key requires belongs_to"] },
     CompileFail { file: "foreign_actions_without_key.zolo", patterns: ["actions require foreign_key"] },
-    CompileFail { file: "foreign_unknown_model.zolo", patterns: ["model is not visible"] },
-    CompileFail { file: "foreign_unknown_field.zolo", patterns: ["unknown referenced field"] },
+    CompileFail { file: "foreign_unknown_model.zolo", patterns: ["TE217.*Missing"] },
+    CompileFail { file: "foreign_unknown_field.zolo", patterns: ["TE217.*missing"] },
     CompileFail { file: "foreign_non_unique.zolo", patterns: ["UNIQUE key"] },
     CompileFail { file: "foreign_wrong_type.zolo", patterns: ["field type does not match"] },
-    CompileFail { file: "foreign_invalid_action.zolo", patterns: ["unknown foreign.key action"] },
+    CompileFail { file: "foreign_invalid_action.zolo", patterns: ["TE217.*Remove", "TE101.*Remove"] },
     CompileFail { file: "foreign_non_optional_set_null.zolo", patterns: ["SET NULL requires an optional"] },
     CompileFail { file: "foreign_set_default_without_sql_delete.zolo", patterns: ["SET DEFAULT requires default_sql"] },
     CompileFail { file: "foreign_set_default_without_sql_update.zolo", patterns: ["SET DEFAULT requires default_sql"] },

@@ -11,6 +11,6 @@ struct Parent {
 struct Item {
   @model(primary_key: true)
   id: int,
-  @model(belongs_to: "Parent", foreign_key: true, on_delete: "remove")
+  @model(belongs_to: Parent, foreign_key: true, on_delete: .Remove)
   owner_id: int,
 }

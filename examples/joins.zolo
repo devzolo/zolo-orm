@@ -10,7 +10,7 @@ struct Node {
   @model(primary_key: true)
   id: int,
   name: str,
-  @model(belongs_to: "Node", column: "parent_key")
+  @model(belongs_to: Node, column: "parent_key")
   parent_id: int?,
 }
 
@@ -140,9 +140,9 @@ struct ReaderParent {
 struct ReaderChild {
   @model(primary_key: true)
   id: int,
-  @model(belongs_to: "ReaderParent")
+  @model(belongs_to: ReaderParent)
   a_read_b: int,
-  @model(belongs_to: "ReaderParent")
+  @model(belongs_to: ReaderParent)
   a: int,
 }
 

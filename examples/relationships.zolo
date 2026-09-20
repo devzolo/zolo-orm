@@ -16,7 +16,7 @@ struct Author {
 struct Article {
   @model(primary_key: true, generated: true)
   id: int,
-  @model(belongs_to: "Author", foreign_key: true, on_delete: "cascade", index: true)
+  @model(belongs_to: Author, foreign_key: true, on_delete: .Cascade, index: true)
   author_id: int,
   title: str,
 }

@@ -24,7 +24,7 @@ fs.mkdir(output_root)
 run_step(sh"{zolo} install".cwd(examples), "install examples")
 
 let backends = ["native", "llvm"]
-let cases = ["basic", "upsert", "relationships", "integration", "dx", "dx_imports", "expressions", "hygiene", "required_reads", "error_handling", "schema_writes", "foreign_keys", "relations", "joins", "nullable_projections"]
+let cases = ["basic", "upsert", "relationships", "integration", "dx", "dx_imports", "expressions", "hygiene", "required_reads", "error_handling", "schema_writes", "foreign_keys", "relations", "joins", "nullable_projections", "typed_relations"]
 for backend in backends {
     for case in cases {
         let output = path.join(output_root, "{case}-{backend}")

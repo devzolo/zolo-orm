@@ -32,10 +32,10 @@ Field options:
 | `unique: true` | Adds a UNIQUE constraint and a typed `upsert_by_FIELD` method. |
 | `index: true` | Adds a named index on this field. |
 | `column: "name"` | Maps the field to a different SQL column. |
-| `belongs_to: "Parent"` | Declares a relation to a visible model type, including an imported alias. |
-| `references: "field"` | The parent's logical field name; defaults to `id`. |
+| `belongs_to: Parent` | Declares a relation to a visible model type, including an imported alias. |
+| `references: Parent.field` | A field reference on the same parent type; defaults to `id`. |
 | `foreign_key: true` | Adds an enforced foreign key for the declared relation. |
-| `on_delete` / `on_update` | `no_action`, `restrict`, `cascade`, `set_null` or `set_default`; require `foreign_key: true`. |
+| `on_delete` / `on_update` | `.NoAction`, `.Restrict`, `.Cascade`, `.SetNull` or `.SetDefault`; require `foreign_key: true`. |
 | `default_sql: "literal"` | A database default used by schema tooling; construction defaults remain application-side. |
 
 Without `generated: true` the application supplies every key. Generated keys use

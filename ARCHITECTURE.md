@@ -123,9 +123,13 @@ logical fields to quoted SQL columns. Schema statements are deterministic and
 shared by `schema_sql`, `schema_statements`, `create_table` and the compiler's
 `@sql_schema(ddl)` metadata. Migrations consume the same DDL.
 
-Foreign keys are opt-in on `belongs_to`. The generic compile-time
-`resolve_visible_type` lookup reads the consumer's visible type catalog,
-without changing the producer's executable lexical scope. The ORM reads the
+Foreign keys are opt-in on `belongs_to`. Generic `TypeRef` and `FieldRef`
+attribute values resolve against the consumer's visible type catalog and retain
+canonical declaration identity, imported binding syntax and reflected metadata.
+The ORM checks that an explicit field belongs to the same target declaration;
+aliases of that declaration remain equivalent. `ForeignKeyAction` enum values
+encode referential actions. This preserves the producer's executable lexical
+scope. The ORM reads the
 referenced model's raw decorators to resolve its canonical table, column and
 unique-key status. It validates the field types and referential actions before
 emitting REFERENCES. A loader alone retains its earlier behavior and produces

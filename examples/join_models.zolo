@@ -8,6 +8,6 @@ pub struct Worker {
   id: int,
   @model(column: "display_name")
   name: str,
-  @model(belongs_to: "Team", column: "department_key")
+  @model(belongs_to: Team, column: "department_key")
   department_id: int?,
 }

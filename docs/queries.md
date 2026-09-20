@@ -96,7 +96,7 @@ the caller needs to distinguish those outcomes. See
 
 A `belongs_to` field generates one INNER and one LEFT join method when its
 target is a model with a nonoptional primary key. The method uses the logical
-field name. For `@model(belongs_to: "Department") department_id: int?`:
+field name. For `@model(belongs_to: Department) department_id: int?`:
 
 ```rust
 let rows = Worker::query()

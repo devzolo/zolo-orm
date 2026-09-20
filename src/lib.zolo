@@ -351,17 +351,26 @@ struct ModelOptions {
   unique_indexes: {str: [str]} = #{},
 }
 
+/// Referential action applied by the database to a declared foreign key.
+pub enum ForeignKeyAction {
+  NoAction,
+  Restrict,
+  Cascade,
+  SetNull,
+  SetDefault,
+}
+
 struct FieldOptions {
   column: str = "",
   primary_key: bool = false,
   unique: bool = false,
   index: bool = false,
   generated: bool = false,
-  belongs_to: str = "",
-  references: str = "id",
+  belongs_to: TypeRef? = nil,
+  references: FieldRef? = nil,
   foreign_key: bool = false,
-  on_delete: str = "",
-  on_update: str = "",
+  on_delete: ForeignKeyAction = .NoAction,
+  on_update: ForeignKeyAction = .NoAction,
   /// Explicit SQL literal default for schema migrations; Zolo defaults remain application-side.
   default_sql: str = "",
 }
@@ -444,29 +453,41 @@ fn reflected_column(field) -> str {
 }
 
 @comptime
-fn foreign_action(action: str) -> str {
+fn foreign_action(action: ForeignKeyAction) -> str {
   return match action {
-    "" => "NO ACTION",
-    "no_action" => "NO ACTION",
-    "restrict" => "RESTRICT",
-    "cascade" => "CASCADE",
-    "set_null" => "SET NULL",
-    "set_default" => "SET DEFAULT",
-    _ => panic("orm: unknown foreign-key action: " + action),
+    .NoAction => "NO ACTION",
+    .Restrict => "RESTRICT",
+    .Cascade => "CASCADE",
+    .SetNull => "SET NULL",
+    .SetDefault => "SET DEFAULT",
   }
+}
+
+/// Resolve the logical referenced field once, preserving its owner identity.
+@comptime
+fn relation_field(field) {
+  let parent = field.opts.belongs_to
+  if parent == nil { panic("orm: references requires belongs_to") }
+  if parent.info.kind != "struct" { panic("orm: relation target must be a struct") }
+  let referenced = field.opts.references
+  if referenced != nil {
+    if referenced.owner.identity != parent.identity {
+      panic("orm: references field must belong to the belongs_to type")
+    }
+    return referenced.info
+  }
+  let fields = parent.info.fields.filter(|target| target.name == "id")
+  if fields.len() != 1 { panic("orm: relation target has no id field; provide references: Parent.field") }
+  return fields[0]
 }
 
 @comptime
 fn foreign_key_clause(field) -> str {
   if !field.opts.foreign_key { return "" }
-  if field.opts.belongs_to == "" { panic("orm: foreign_key requires belongs_to") }
-  identifier(field.opts.belongs_to)
-  let parent = resolve_visible_type(field.opts.belongs_to)
-  if parent == nil { panic("orm: foreign-key model is not visible: " + field.opts.belongs_to) }
+  if field.opts.belongs_to == nil { panic("orm: foreign_key requires belongs_to") }
+  let parent = field.opts.belongs_to.info
   if parent.kind != "struct" { panic("orm: foreign-key target must be a model struct") }
-  let targets = parent.fields.filter(|target| target.name == field.opts.references)
-  if targets.len() != 1 { panic("orm: unknown referenced field: " + field.opts.references) }
-  let target = targets[0]
+  let target = relation_field(field)
   if field_kind(target) != field_kind(field) { panic("orm: foreign-key field type does not match referenced field") }
   var unique = model_option(target.decorators, "primary_key", false) || model_option(target.decorators, "unique", false)
   let unique_indexes = model_option(parent.decorators, "unique_indexes", #{})
@@ -562,11 +583,20 @@ pub fn Model(info) -> Syntax<.Items> {
     if field.opts.generated && field.has_default {
       panic("orm: generated key cannot declare an application default")
     }
-    if !field.opts.foreign_key && (field.opts.on_delete != "" || field.opts.on_update != "") {
+    if !field.opts.foreign_key && (model_option(field.decorators, "on_delete", nil) != nil || model_option(field.decorators, "on_update", nil) != nil) {
       panic("orm: foreign-key actions require foreign_key: true")
     }
-    if field.opts.belongs_to != "" && (kind != "int" && kind != "str") {
+    if field.opts.belongs_to != nil && (kind != "int" && kind != "str") {
       panic("orm: belongs_to requires an integer or string key")
+    }
+    if field.opts.references != nil && field.opts.belongs_to == nil {
+      panic("orm: references requires belongs_to")
+    }
+    if field.opts.belongs_to != nil {
+      let referenced = relation_field(field)
+      if field_kind(referenced) != field_kind(field) {
+        panic("orm: foreign-key field type does not match referenced field")
+      }
     }
     let methods = [
       "where_" + field.name, "where_" + field.name + "_not",
@@ -642,8 +672,8 @@ pub fn Model(info) -> Syntax<.Items> {
     let kind = field_kind(field)
     if !reader_kinds.contains(kind) { reader_kinds.push(kind) }
   }
-  for relation in info.fields.filter(|field| field.opts.belongs_to != "") {
-    let parent = resolve_visible_type(relation.opts.belongs_to)
+  for relation in info.fields.filter(|field| field.opts.belongs_to != nil) {
+    let parent = relation.opts.belongs_to.info
     if parent != nil {
       for field in parent.fields {
         let kind = field_kind(field)
@@ -724,19 +754,15 @@ pub fn Model(info) -> Syntax<.Items> {
     },
   )
   let nonkeys = info.fields.filter(|field| !field.opts.primary_key)
-  let relations = info.fields.filter(|field| field.opts.belongs_to != "").map(
+  let relations = info.fields.filter(|field| field.opts.belongs_to != nil).map(
     |field| {
-      let parent_type = syntax.ident(field.opts.belongs_to)
-      let parent_key = syntax.ident(field.opts.references)
+      let parent_type = field.opts.belongs_to.ref
+      let referenced = relation_field(field)
+      let parent_key = referenced.member
       let loader = syntax.ident("load_" + field.name)
       let within = syntax.ident("where_" + field.name + "_in")
       let key_type = if field.type.is_optional { field.type.inner.ref } else { field.type.ref }
-      let parent_info = resolve_visible_type(field.opts.belongs_to)
-      var optional_parent_key = false
-      if parent_info != nil {
-        let referenced = parent_info.fields.filter(|item| item.name == field.opts.references)
-        if referenced.len() == 1 { optional_parent_key = referenced[0].type.is_optional }
-      }
+      let optional_parent_key = referenced.type.is_optional
       let add_key = quote stmt { if seen[key] != true { keys.push(key); seen[key] = true } }
       let collect_key = if optional_parent_key {
         quote stmt { if key != nil { ${add_key} } }
@@ -787,21 +813,20 @@ pub fn Model(info) -> Syntax<.Items> {
   let join_items = []
   let join_methods = []
   let join_readers = []
-  for relation in info.fields.filter(|field| field.opts.belongs_to != "") {
-    let parent = resolve_visible_type(relation.opts.belongs_to)
+  for relation in info.fields.filter(|field| field.opts.belongs_to != nil) {
+    let parent = relation.opts.belongs_to.info
     // A loader can accept plain parent records. SQL joins require model key metadata.
     if parent != nil && parent.kind == "struct" {
       let parent_keys = parent.fields.filter(|field| model_option(field.decorators, "primary_key", false))
       if parent_keys.len() == 1 {
         let parent_key = parent_keys[0]
         if parent_key.type.is_optional { panic("orm: joined model primary key cannot be optional") }
-        let references = parent.fields.filter(|field| field.name == relation.opts.references)
-        if references.len() != 1 { panic("orm: unknown joined reference field: " + relation.opts.references) }
-        if field_kind(references[0]) != field_kind(relation) { panic("orm: joined fields require matching scalar types") }
-        let parent_type = syntax.ident(relation.opts.belongs_to)
+        let referenced = relation_field(relation)
+        if field_kind(referenced) != field_kind(relation) { panic("orm: joined fields require matching scalar types") }
+        let parent_type = relation.opts.belongs_to.ref
         let configured_table = model_option(parent.decorators, "table", "")
         let parent_table = if configured_table == "" { parent.name.lower() } else { configured_table }
-        let reference_column = reflected_column(references[0])
+        let reference_column = reflected_column(referenced)
         let view_name = "__OrmJoin_{info.name.len()}_" + info.name + "_" + relation.name + "_Schema"
         let view_type = syntax.ident(view_name)
         let view_fields = parent.fields.map(|field| {
@@ -848,7 +873,7 @@ pub fn Model(info) -> Syntax<.Items> {
           ordinal = ordinal + 1
         }
         join_items.push(quote items {
-          @sql_schema(table: ${parent_table}, source: ${relation.opts.belongs_to}, query_only: true)
+          @sql_schema(table: ${parent_table}, source: ${relation.opts.belongs_to.binding}, query_only: true)
           pub struct ${view_type} { ${..view_fields} }
         })
         for reader in view_readers { join_readers.push(reader) }

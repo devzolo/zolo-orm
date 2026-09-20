@@ -1,0 +1,9 @@
+use orm::Model
+struct Parent { code: int, }
+@derive(Model)
+struct Child {
+  @model(primary_key: true)
+  id: int,
+  @model(belongs_to: Parent)
+  parent_id: int,
+}

@@ -9,7 +9,7 @@ use schema_parents::Organization as Org
 struct Membership {
   @model(primary_key: true, generated: true)
   id: int,
-  @model(belongs_to: "Org", references: "code", foreign_key: true, on_delete: "set_null", on_update: "cascade", column: "organization_code")
+  @model(belongs_to: Org, references: Org.code, foreign_key: true, on_delete: .SetNull, on_update: .Cascade, column: "organization_code")
   org_code: str?,
   label: str,
 }
@@ -18,7 +18,7 @@ struct Membership {
 struct Invoice {
   @model(primary_key: true, generated: true)
   id: int,
-  @model(belongs_to: "Org", foreign_key: true, on_delete: "cascade")
+  @model(belongs_to: Org, foreign_key: true, on_delete: .Cascade)
   org_id: int,
 }
 
@@ -26,7 +26,7 @@ struct Invoice {
 struct ExternalReference {
   @model(primary_key: true, generated: true)
   id: int,
-  @model(belongs_to: "Org", references: "external_key", foreign_key: true, on_delete: "cascade")
+  @model(belongs_to: Org, references: Org.external_key, foreign_key: true, on_delete: .Cascade)
   org_key: str,
 }
 
@@ -34,7 +34,7 @@ struct ExternalReference {
 struct Restriction {
   @model(primary_key: true, generated: true)
   id: int,
-  @model(belongs_to: "Org", foreign_key: true)
+  @model(belongs_to: Org, foreign_key: true)
   org_id: int,
 }
 
@@ -42,7 +42,7 @@ struct Restriction {
 struct DefaultMembership {
   @model(primary_key: true, generated: true)
   id: int,
-  @model(belongs_to: "Org", foreign_key: true, on_delete: "set_default", default_sql: "1")
+  @model(belongs_to: Org, foreign_key: true, on_delete: .SetDefault, default_sql: "1")
   org_id: int = 1,
 }
 
@@ -58,7 +58,7 @@ struct NullableParent {
 struct NullableChild {
   @model(primary_key: true, generated: true)
   id: int,
-  @model(belongs_to: "NullableParent", references: "code", foreign_key: true, on_delete: "set_null")
+  @model(belongs_to: NullableParent, references: NullableParent.code, foreign_key: true, on_delete: .SetNull)
   code: str?,
 }
 

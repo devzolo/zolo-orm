@@ -6,7 +6,8 @@ Declare a model once, then use typed creation, partial updates, atomic upserts,
 query projections and explicit relation loading. The same metadata produces
 indexes, foreign keys, typed INNER/LEFT joins and migrations. Field names and
 value types are checked by the compiler; query values are bound separately
-from SQL. Optional scalar projections preserve NULL positions.
+from SQL. Relations reference types and fields directly; referential actions use enums.
+Optional scalar projections preserve NULL positions.
 
 [Get started](docs/getting-started.md) · [Documentation](docs/README.md) ·
 [Runnable examples](examples/README.md) · [Architecture](ARCHITECTURE.md)
@@ -80,6 +81,20 @@ The application owns the connection. The example propagates errors with `?`
 and unwraps only at its outer boundary; see
 [error handling](docs/errors-and-compatibility.md#errors) for expected absence
 and constraint failures.
+
+## Typed relations
+
+Relationship metadata uses the same symbols as application code:
+
+```rust
+@model(belongs_to: Team, references: Team.code, foreign_key: true, on_delete: .Cascade)
+team_code: str,
+```
+
+Omit `references` to use `Team.id`. Imported aliases work, and the
+referenced field must belong to the target type. Keep database names such as
+`column: "team_code"` as strings. See [typed declarations and upgrading](docs/relations-and-transactions.md#typed-relationship-declarations)
+and the runnable [alias example](examples/typed_relations.zolo).
 
 ## Add it to your project
 

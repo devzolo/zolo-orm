@@ -1,15 +1,14 @@
 use orm::Model
-
 @derive(Model)
 struct Parent {
   @model(primary_key: true)
   id: int,
 }
-
+let instance = Parent { id: 1 }
 @derive(Model)
-struct Item {
+struct Child {
   @model(primary_key: true)
   id: int,
-  @model(belongs_to: Parent, foreign_key: true, on_delete: .SetDefault)
-  parent_id: int = 1,
+  @model(belongs_to: instance)
+  parent_id: int,
 }

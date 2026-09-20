@@ -4,6 +4,6 @@ use orm::Model
 struct Item {
   @model(primary_key: true)
   id: int,
-  @model(on_delete: .Cascade)
+  @model(on_delete: .NoAction)
   owner_id: int,
 }

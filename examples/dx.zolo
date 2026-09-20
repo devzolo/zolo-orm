@@ -21,7 +21,7 @@ struct Profile {
 struct Message {
   @model(primary_key: true, generated: true)
   id: int,
-  @model(belongs_to: "Profile")
+  @model(belongs_to: Profile)
   profile_id: int,
   text: str,
 }

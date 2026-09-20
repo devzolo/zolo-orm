@@ -4,6 +4,6 @@ use orm::Model
 struct Item {
   @model(primary_key: true)
   id: int,
-  @model(belongs_to: "Missing", foreign_key: true)
+  @model(belongs_to: Missing, foreign_key: true)
   owner_id: int,
 }

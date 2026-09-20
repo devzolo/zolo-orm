@@ -1,0 +1,58 @@
+//! Type and field references keep imported aliases tied to the same declaration.
+use std::database::Database
+use orm::{Model, ForeignKeyAction}
+use schema_parents::Organization as Team
+use schema_parents::Organization as Organization
+
+@derive(Model)
+@model(table: "typed_members")
+struct Member {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(
+    belongs_to: Team,
+    references: Organization.code,
+    foreign_key: true,
+    on_delete: ForeignKeyAction::Cascade,
+    on_update: .Cascade,
+    column: "team_code",
+  )
+  team: str,
+}
+
+@derive(Model)
+struct RestrictedMember {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(belongs_to: Team, references: Team.id, foreign_key: true, on_delete: .Restrict)
+  team_id: int,
+}
+
+fn exercise_typed_relations() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  Team::create_table(db).unwrap()
+  Member::create_table(db).unwrap()
+  assert(Member::schema_sql().contains(
+    "REFERENCES \"organizations\" (\"org_code\") ON DELETE CASCADE ON UPDATE CASCADE",
+  ))
+  assert(RestrictedMember::schema_sql().contains("ON DELETE RESTRICT ON UPDATE NO ACTION"))
+  let team = Team::create(db, code: "engineering", external_key: "eng").unwrap()
+  let member = Member::create(db, team: team.code).unwrap()
+  let joined = Member::query().inner_join_team().first(db).unwrap()
+  assert(joined != nil)
+  assert(joined.left.id == member.id)
+  assert(joined.right.id == team.id)
+  let grouped = Member::load_team(db, [team]).unwrap()
+  assert(grouped[0].items.len() == 1)
+  Team::changes().set_code("platform").apply(db, team.id).unwrap()
+  assert(Member::find_or_error(db, member.id).unwrap().team == "platform")
+  team.delete(db).unwrap()
+  assert(Member::query().count(db).unwrap() == 0)
+}
+
+@test
+fn typed_relation_aliases() { exercise_typed_relations() }
+
+exercise_typed_relations()
+print("orm typed relation metadata: ok")

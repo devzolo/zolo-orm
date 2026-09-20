@@ -13,7 +13,7 @@ struct Customer {
 struct Ticket {
   @model(primary_key: true, generated: true)
   id: int,
-  @model(belongs_to: "Customer", references: "code")
+  @model(belongs_to: Customer, references: Customer.code)
   customer_code: str?,
   label: str,
 }

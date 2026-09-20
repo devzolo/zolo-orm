@@ -3,13 +3,12 @@ use orm::Model
 struct Parent {
   @model(primary_key: true)
   id: int,
-  name: str,
 }
+enum OtherAction { Cascade, }
 @derive(Model)
 struct Child {
   @model(primary_key: true)
   id: int,
-  @model(belongs_to: Parent)
-  parent_id: int?,
+  @model(belongs_to: Parent, foreign_key: true, on_delete: OtherAction::Cascade)
+  parent_id: int,
 }
-let q = Child::query().left_join_parent_id().select(|child| child.id)

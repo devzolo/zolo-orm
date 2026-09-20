@@ -9,7 +9,7 @@ struct Parent {
 struct Child {
   @model(primary_key: true)
   id: int,
-  @model(belongs_to: "Parent")
+  @model(belongs_to: Parent)
   parent_id: int?,
 }
 let q = Child::query().left_join_parent_id().filter(|child, parent| parent.name == "unsafe")

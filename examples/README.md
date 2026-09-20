@@ -123,3 +123,11 @@ columns, imports and reexports, self joins, ON/WHERE bindings, pagination and
 decode errors. Expected output includes `orm typed joins: ok`.
 
 Optional scalar projections preserve NULL positions; see [nullable projections](nullable_projections.zolo).
+
+### Typed relationship metadata
+
+[typed_relations.zolo](typed_relations.zolo) uses type and field references,
+two imported aliases of the same parent, contextual and explicit action enums,
+a typed join and cascade updates/deletes. Run it with
+`zolo run typed_relations.zolo --no-cache`. Expected output:
+`orm typed relation metadata: ok`.
