@@ -19,7 +19,7 @@ fn example(db: Database) -> Result<int, OrmError> {
   // Convenient for this in-memory demo. Use migrations for a persistent schema.
   User::create_table(db)?
   let ana = User::create(db, name: "Ana", email: "ana@example.com")?
-  User::changes().set_note("Welcome").apply(db, ana.id)?
+  User::changes(note: "Welcome").apply(db, ana.id)?
 
   let users = User::query()
     .filter(|user| user.active && user.name.starts_with("A"))

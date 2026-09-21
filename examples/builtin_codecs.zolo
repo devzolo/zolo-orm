@@ -1,0 +1,96 @@
+//! Built-in domains use canonical, lossless storage and real BLOB parameters.
+use std::database::Database
+use orm::{Model, OrmError, Date, DateCodec, Timestamp, TimestampCodec, ExactDecimal, DecimalCodec, Blob, BlobCodec}
+
+@derive(Model)
+@model(table: "builtin_documents")
+struct Document {
+  @model(primary_key: true)
+  id: int,
+  @model(codec: DateCodec)
+  day: Date,
+  @model(codec: TimestampCodec)
+  created_at: Timestamp,
+  @model(codec: DecimalCodec)
+  amount: ExactDecimal,
+  @model(codec: BlobCodec, storage: .Binary)
+  payload: Blob,
+  @model(codec: BlobCodec, storage: .Binary)
+  optional_payload: Blob?,
+}
+
+fn exercise_builtin_codecs() {
+  assert(Date::parse("2024-02-29").is_ok())
+  assert(Date::parse("2023-02-29").is_err())
+  assert(Date::parse("1900-02-29").is_err())
+  assert(Date::parse("2000-02-29").is_ok())
+  assert(Date::parse("2024-04-31").is_err())
+  assert(Date::parse("0000-01-01").is_err())
+  assert(Date::parse("2024-é2-29").is_err())
+  assert(Timestamp::parse("2024-02-29Té:00:00Z").is_err())
+  assert(Timestamp::parse("2024-02-29T23:59:59.123456789Z").is_ok())
+  assert(Timestamp::parse("2024-02-29T24:00:00Z").is_err())
+  assert(Timestamp::parse("2024-02-29T00:00:00+01:00").is_err())
+  assert(Timestamp::parse("2024-02-29T00:00:00.1234567890Z").is_err())
+  assert(ExactDecimal::parse("-000.000").unwrap().unwrap() == "0")
+  assert(ExactDecimal::parse("00012.3400").unwrap().unwrap() == "12.34")
+  assert(ExactDecimal::parse("1e3").is_err())
+  assert(ExactDecimal::parse("NaN").is_err())
+  assert(Blob::from_bytes([256]).is_err())
+  assert(Blob::from_bytes([-1]).is_err())
+  let source = [0, 255, 128, 65, 0]
+  let blob = Blob::from_bytes(source).unwrap()
+  source[0] = 10
+  let copy = blob.bytes()
+  copy[0] = 20
+  assert(blob.bytes()[0] == 0)
+
+  let db = Database::open("sqlite://:memory:").unwrap()
+  defer db.close()
+  Document::create_table(db).unwrap()
+  assert(Document::schema_sql().contains("BLOB"))
+  let precise = ExactDecimal::parse("9007199254740993.12345678901234567890123456789").unwrap()
+  let day = Date::parse("2024-02-29").unwrap()
+  let instant = Timestamp::parse("2024-02-29T23:59:59.1Z").unwrap()
+  Document::create(db, id: 1, day, created_at: instant, amount: precise,
+    payload: blob, optional_payload: nil).unwrap()
+  let row = Document::find_or_error(db, 1).unwrap()
+  assert(row.day.unwrap() == "2024-02-29")
+  assert(row.created_at.unwrap() == "2024-02-29T23:59:59.100000000Z")
+  assert(row.amount.unwrap() == precise.unwrap())
+  assert(row.payload.bytes() == [0, 255, 128, 65, 0])
+  assert(row.optional_payload == nil)
+  let raw = db.query("SELECT typeof(payload) AS kind, length(payload) AS size FROM builtin_documents", []).unwrap()
+  assert(raw[0]["kind"] == "blob" && raw[0]["size"] == 5)
+  let empty = Blob::from_bytes([]).unwrap()
+  Document::changes(payload: empty, optional_payload: blob).apply(db, 1).unwrap()
+  let updated = Document::find_or_error(db, 1).unwrap()
+  assert(updated.payload.bytes().len() == 0)
+  assert(updated.optional_payload != nil)
+  let selected: [Blob] = Document::query().select(|document| document.payload).all(db).unwrap()
+  assert(selected[0].bytes().len() == 0)
+  let bound = blob
+  assert(Document::query().filter(|document| document.optional_payload == bound).count(db).unwrap() == 1)
+  Document::create(db, id: 2, day, created_at: instant, amount: precise,
+    payload: blob, optional_payload: blob).unwrap()
+  let first = Document::query().where_optional_payload(blob).seek_page(db, size: 1).unwrap()
+  assert(first.next_cursor != nil)
+  let identical = Blob::from_bytes([0, 255, 128, 65, 0]).unwrap()
+  let next = Document::query().where_optional_payload(identical)
+    .seek_page(db, size: 1, after: first.next_cursor).unwrap()
+  assert(next.items.len() == 1 && next.items[0].id == 2)
+  let different = Blob::from_bytes([0, 255, 128, 65, 1]).unwrap()
+  assert(Document::query().where_optional_payload(different)
+    .seek_page(db, size: 1, after: first.next_cursor).is_err())
+  db.execute("UPDATE builtin_documents SET day = ? WHERE id = ?", ["2023-02-29", 1]).unwrap()
+  match Document::find_or_error(db, 1) {
+    .Err(.FieldDecode(error)) => assert(error.field == "day"),
+    _ => panic("expected contextual domain decode failure"),
+  }
+}
+
+@test
+fn builtin_codecs_preserve_values() { exercise_builtin_codecs() }
+
+exercise_builtin_codecs()
+print("orm builtin codecs: ok")

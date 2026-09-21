@@ -1,0 +1,5 @@
+use orm::Model
+struct Codec {}
+impl Codec { fn encode(value: str) -> str { value } fn decode(value: str) -> Result<int, str> { Result::Ok(1) } }
+@derive(Model)
+struct Item { @model(primary_key: true) id: int, @model(codec: Codec) value: str, }

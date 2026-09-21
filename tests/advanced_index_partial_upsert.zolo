@@ -1,0 +1,9 @@
+use std::database::Database
+use orm::Model
+@derive(Model)
+@model(primary_key: [Entry.id], advanced_indexes: #{
+  active_name: #{terms: [#{field: Entry.name}], unique: true, predicate: [#{field: Entry.active, kind: .IsTrue}]}
+})
+struct Entry { id: int, name: str, active: bool }
+let db = Database.open("sqlite://:memory:").unwrap()
+Entry::upsert_by_index_active_name(db, EntryInsert { id: 1, name: "name", active: true }, Entry::changes(name: "changed"))

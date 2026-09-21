@@ -1,0 +1,5 @@
+use orm::Model
+struct Other { id: int }
+@derive(Model)
+@model(primary_key: [Other.id, Entry.id])
+struct Entry { id: int, tenant_id: int }

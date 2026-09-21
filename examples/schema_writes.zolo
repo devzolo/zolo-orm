@@ -4,8 +4,8 @@ use std::database::{Database, DbErrorKind}
 use orm::{Model, OrmError}
 
 @derive(Model)
-@model(table: "directory_members", indexes: #{by_name: ["name", "tenant_id"]}, unique_indexes: #{
-  tenant_email: ["tenant_id", "email"],
+@model(table: "directory_members", indexes: #{by_name: [DirectoryMember.name, DirectoryMember.tenant_id]}, unique_indexes: #{
+  tenant_email: [DirectoryMember.tenant_id, DirectoryMember.email],
 })
 struct DirectoryMember {
   @model(primary_key: true, generated: true, column: "member_id")
@@ -32,7 +32,7 @@ struct OptionalTag {
 
 // These table/name pairs used to collapse to the same SQL index name.
 @derive(Model)
-@model(table: "a_b", unique_indexes: #{c: ["code"]})
+@model(table: "a_b", unique_indexes: #{c: [FirstBoundary.code]})
 struct FirstBoundary {
   @model(primary_key: true, generated: true)
   id: int,
@@ -40,7 +40,7 @@ struct FirstBoundary {
 }
 
 @derive(Model)
-@model(table: "a", unique_indexes: #{b_c: ["code"]})
+@model(table: "a", unique_indexes: #{b_c: [SecondBoundary.code]})
 struct SecondBoundary {
   @model(primary_key: true, generated: true)
   id: int,

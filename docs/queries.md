@@ -30,12 +30,14 @@ Generated methods cover the common cases without a lambda:
 | --- | --- |
 | `.where_email(value)` / `.where_email_not(value)` | `=` / `<>` |
 | `.where_id_in([1, 2])` | `IN`; an empty list matches no rows |
-| `.where_id_gt(10)` / `.where_id_lt(20)` | `>` / `<`, generated for non-bool fields |
+| `.where_id_gt(10)` / `.where_id_lt(20)` | `>` / `<`, generated for non-bool scalar fields without codecs |
 | `.where_note(nil)` / `.where_note_not(nil)` | `IS NULL` / `IS NOT NULL` |
 
-Chained filters combine with `AND`.
+Chained filters combine with `AND`. [Codec fields](domain-codecs.md) accept
+domain values for equality, inequality and generated IN filters; range, string
+matching, truthiness and implicit domain ordering are not supported.
 
-## Ordering, pagination and reading
+## Ordering and reading
 
 ```rust
 User::query()
@@ -52,6 +54,7 @@ Choose the read that matches the caller's intent:
 | --- | --- |
 | `.all(db)` | `Result<[User], OrmError>`; every row in the requested page. |
 | `.first(db)` | `Result<User?, OrmError>`; the first row, or `nil`. |
+| `.first_row(db)` | `Result<Row<User>?, OrmError>`; a wrapper with `value`, or `nil` when absent. |
 | `.first_or_error(db)` | `Result<User, OrmError>`; the first row, or `NotFound("User")`. |
 | `.count(db)` | `Result<int, OrmError>`; matching records before pagination. |
 | `.exists(db)` | `Result<bool, OrmError>`; whether any record matches, before pagination. |
@@ -88,9 +91,93 @@ present `nil` element: leading, middle and trailing NULL values retain their
 positions, including when every value is NULL. An empty result is `[]`.
 
 `first(db)` returns `T?`, so a NULL scalar and no row both produce `nil`.
-Select a tuple containing a required key, such as `(user.id, user.note)`, when
-the caller needs to distinguish those outcomes. See
-[nullable_projections.zolo](../examples/nullable_projections.zolo).
+Use `first_row` to distinguish them without selecting an extra column:
+
+```rust
+let result = User::query().where_id(1).select(|user| user.note).first_row(db)?
+if let row = result {
+  // The row exists. row.value has type str? and may be nil (SQL NULL).
+  print(row.value ?? "No note")
+}
+```
+
+`first_row` returns `Result<Row<T>?, OrmError>`. Only absence makes the wrapper
+`nil`; the value inside keeps the projection's exact type. `first_or_error` is
+also available on projections: a present NULL scalar returns `Ok(nil)`, while
+absence returns `NotFound` with the source model name. Both honor ordering,
+offset and zero limits and propagate decoder failures.
+
+See [nullable_projections.zolo](../examples/nullable_projections.zolo) and
+[pagination.zolo](../examples/pagination.zolo) for present NULL values,
+absence and LEFT joins.
+
+## Numbered pages
+
+```rust
+let users = User::query().where_active(true).order_by_name()
+let page = users.page(db, number: 2, size: 20)?
+let emails = users.select(|user| user.email).page(db, number: 1, size: 10)?
+```
+
+`page` is available on model queries, projections and INNER/LEFT joins. It
+returns `Result<Page<T>, OrmError>`:
+
+| Field | Meaning |
+| --- | --- |
+| `items: [T]` | Decoded rows, preserving NULL projection slots. |
+| `number: int` / `size: int` | Requested page number and size; defaults are 1 and 20. |
+| `total: int` | Matching rows before pagination. |
+| `total_pages: int` | Rounded-up page count, or 0 for an empty result. |
+| `next_page: int?` | The next number when it does not exceed `total_pages`; otherwise nil. |
+| `previous_page: int?` | `number - 1` when `number > 1`; otherwise nil, including for empty results. |
+
+The primary key is appended to the requested ordering to break ties. Without
+an explicit order, pages follow ascending primary keys. Joined pages append
+every source's key, and count joined rows, including multiple matches per
+left row. Projections retain this ordering without adding columns to their
+returned values. The original query remains reusable.
+
+A request beyond the last page returns empty `items` and retains the total.
+Page numbers and sizes must be positive and their offset must fit in `int`.
+Combining `page` with an existing `limit` or a nonzero `offset` returns
+`InvalidPagination`, including `limit(0)`.
+
+Each page performs a count and a select. It starts no transaction; use
+`orm::transaction` around the call when both statements must observe the same
+SQLite snapshot. Separate page requests do not freeze changing data.
+
+## Cursor pages
+
+Use cursor pagination when a primary-key continuation is enough and totals
+are unnecessary:
+
+```rust
+let users = User::query().where_active(true)
+let first = users.cursor_page(db, size: 20)?
+if first.has_next {
+  let second = users.cursor_page(db, size: 20, after: first.next_cursor)?
+}
+```
+
+The generated method is available for model queries whose primary key is
+`int` or `str`. Its result is `CursorPage<Model, Key>`, with `items`,
+`has_next: bool` and `next_cursor: Key?`. The cursor is the last emitted key
+only when another page exists; otherwise it is `nil`. A nil `after` starts
+from the beginning. A non-nil cursor is an exclusive, bound SQL value and
+does not have to identify a currently existing row.
+
+The default is ascending key order. Pass `descending: true` on every request
+to walk backward. Keep filters and direction the same across requests.
+The method uses one query and requests one extra row to detect continuation;
+it decodes only the rows being returned.
+
+A positive size must leave room for that extra row. Existing ordering,
+limits, nonzero offsets or joins return `InvalidPagination`. Cursor methods
+are not generated for projections, joined queries or float/bool primary keys.
+The cursor is a typed key, not an encoded token or a database snapshot.
+
+See [pagination.zolo](../examples/pagination.zolo) for both styles, string
+keys, stable joins, invalid requests and query reuse.
 
 ## Typed relation joins
 
@@ -143,11 +230,17 @@ rows, without introducing a hidden subquery. `count` counts joined rows and
 `exists` probes that same relation, both ignoring pagination and ordering.
 No implicit distinct count is added.
 
-This release supports one `belongs_to` relation join per query. It does not
-expose arbitrary join conditions in place of the relation key, chained joins,
-joined mutations, computed projections, or RIGHT/FULL joins. For those queries,
-use explicit SQL. See [joins.zolo](../examples/joins.zolo) for imports, reexports,
-self joins, bound ON conditions and decoding failures.
+Joined queries also expose `first_row`, `first_or_error` and numbered `page`.
+A LEFT row with no right match remains a present row with `right == nil`.
+Required-read errors name the left model, and projected nullable fields follow
+the presence contract described above.
+
+These helpers expose one `belongs_to` edge. For several sources, relation chains
+or repeated models, declare a [composed query view](composed-queries.md) with
+`@derive(Query)`. It gives each source a name and produces that view as its result.
+[Computed projections and aggregates](aggregates.md) use the same source lambdas.
+Joined mutations and RIGHT/FULL joins still require explicit SQL. See [joins.zolo](../examples/joins.zolo) for the single-edge API,
+imports, reexports, self joins, bound ON conditions and decoding failures.
 
 ## Deleting
 
@@ -185,7 +278,9 @@ name.
 
 The derive also publishes the schema to the compiler, so `sql"..."` literals
 are checked against the visible tables, columns and parameter types at compile
-time. The same metadata drives editor completion and diagnostics.
+time. The same metadata drives editor completion and diagnostics. Codec columns
+use their physical storage type for raw parameters; raw SQL does not encode
+domain values automatically, while `from_sql` still decodes them.
 
 ## Capture values before filtering
 
@@ -202,7 +297,9 @@ let total = active.count(db)?
 
 Each builder call returns a new query. Here `active` stays reusable and
 `total` counts all active users, not the page. Use deterministic ordering when
-paging. Relation joins are described above; computed projections are not generated.
+paging. [Computed projections and aggregates](aggregates.md) extend selections
+with SQL arithmetic, grouping and HAVING. [Advanced cursors](advanced-cursors.md)
+continue typed orderings across model, joined and projected queries.
 
 Scalar and tuple projections preserve NULL values and row count. Optional
 fields retain their optional types, including fields from the right side of a

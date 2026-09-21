@@ -1,7 +1,7 @@
 use orm::Model
 
 @derive(Model)
-@model(table: "organizations", unique_indexes: #{by_external_key: ["external_key"]})
+@model(table: "organizations", unique_indexes: #{by_external_key: [Organization.external_key]})
 pub struct Organization {
   @model(primary_key: true, generated: true, column: "org_key")
   pub id: int,

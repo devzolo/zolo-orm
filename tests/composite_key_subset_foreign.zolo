@@ -1,0 +1,9 @@
+use orm::Model
+@derive(Model)
+@model(primary_key: [Parent.tenant_id, Parent.id])
+struct Parent { tenant_id: int, id: int }
+@derive(Model)
+@model(primary_key: [Child.id], foreign_keys: #{
+  parent: #{fields: [Child.parent_id], references: [Parent.id]}
+})
+struct Child { id: int, parent_id: int }

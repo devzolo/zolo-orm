@@ -1,0 +1,227 @@
+//! Presence-aware reads and deterministic numbered/keyset pagination.
+use std::database::Database
+use orm::{Model, OrmError, QueryPlan}
+
+@derive(Model)
+@model(table: "page_buckets")
+struct Bucket {
+  @model(primary_key: true, column: "bucket_key")
+  id: int,
+  category: int,
+  name: str,
+}
+
+@derive(Model)
+@model(table: "page_entries", indexes: #{by_rank: [Entry.rank, Entry.id]})
+struct Entry {
+  @model(primary_key: true, column: "entry_key")
+  id: int,
+  rank: int,
+  note: str?,
+  // Non-unique target deliberately exercises joined row multiplicity.
+  @model(belongs_to: Bucket, references: Bucket.category, column: "bucket_code")
+  bucket: int?,
+}
+
+@derive(Model)
+@model(table: "page_labels")
+struct Label {
+  @model(primary_key: true, column: "label_key")
+  id: str,
+  title: str,
+}
+
+fn expect_not_found<T>(result: Result<T, OrmError>) {
+  match result {
+    .Err(.NotFound(model)) => assert(model == "Entry"),
+    _ => panic("expected NotFound for the queried model"),
+  }
+}
+
+fn expect_invalid_page<T>(result: Result<T, OrmError>) {
+  match result {
+    .Err(.InvalidPagination(_)) => {},
+    _ => panic("expected InvalidPagination"),
+  }
+}
+
+fn seed(db: Database) {
+  Bucket::create_table(db).unwrap()
+  Entry::create_table(db).unwrap()
+  Label::create_table(db).unwrap()
+  Bucket::insert_many(db, [
+    Bucket.new(20, 1, "B"), Bucket.new(10, 1, "A"), Bucket.new(30, 2, "C"),
+  ]).unwrap()
+  Entry::insert_many(db, [
+    Entry.new(5, 2, "five", 1),
+    Entry.new(1, 0, nil, 1),
+    Entry.new(4, 1, "four", 99),
+    Entry.new(2, 0, "two", nil),
+    Entry.new(3, 1, nil, 2),
+  ]).unwrap()
+  Label::insert_many(db, [Label.new("c", "C"), Label.new("a", "A"), Label.new("b", "B")]).unwrap()
+}
+
+fn presence_reads(db: Database) {
+  let base = Entry::query().order_by_id()
+  let null_value = base.where_id(1).select(|entry| entry.note)
+  assert(null_value.first(db).unwrap() == nil, "first keeps its existing optional contract")
+  let row = null_value.first_row(db).unwrap() ?? panic("SQL NULL still has a row")
+  assert(row.value == nil)
+  let required: str? = null_value.first_or_error(db).unwrap()
+  assert(required == nil, "a required row may contain a nullable scalar NULL")
+  let absent = base.where_id(99).select(|entry| entry.note)
+  assert(absent.first_row(db).unwrap() == nil)
+  expect_not_found(absent.first_or_error(db))
+  assert(base.limit(0).first_row(db).unwrap() == nil)
+  expect_not_found(null_value.limit(0).first_or_error(db))
+  assert(base.limit(1).offset(8).first_row(db).unwrap() == nil)
+  let second = base.limit(1).offset(1).first_row(db).unwrap() ?? panic("second row")
+  assert(second.value.id == 2)
+  let joined = base.where_id(2).left_join_bucket().first_or_error(db).unwrap()
+  assert(joined.left.id == 2 && joined.right == nil, "LEFT absence is not absence of the row")
+  let joined_row = base.where_id(2).left_join_bucket().first_row(db).unwrap() ?? panic("joined row")
+  assert(joined_row.value.right == nil)
+  expect_not_found(base.where_id(2).inner_join_bucket().first_or_error(db))
+  let projected = base.where_id(2).left_join_bucket().select(|entry, bucket| bucket?.name)
+  let projected_row = projected.first_row(db).unwrap() ?? panic("nullable joined projection")
+  assert(projected_row.value == nil)
+  assert(projected.first_or_error(db).unwrap() == nil)
+}
+
+fn numbered_pages(db: Database) {
+  let base = Entry::query()
+  let first = base.page(db, size: 2).unwrap()
+  assert(first.number == 1 && first.size == 2 && first.total == 5 && first.total_pages == 3)
+  assert(first.items[0].id == 1 && first.items[1].id == 2)
+  assert(first.previous_page == nil && first.next_page == 2)
+  let second = base.order_by_rank().page(db, number: 2, size: 2).unwrap()
+  assert(second.items[0].id == 3 && second.items[1].id == 4, "primary key breaks rank ties")
+  assert(second.previous_page == 1 && second.next_page == 3)
+  let reverse = base.order_by_rank(descending: true).page(db, size: 3).unwrap()
+  assert(reverse.items[0].id == 5 && reverse.items[1].id == 3 && reverse.items[2].id == 4)
+  let last = base.page(db, number: 3, size: 2).unwrap()
+  assert(last.items.len() == 1 && last.items[0].id == 5 && last.next_page == nil)
+  let past = base.page(db, number: 4, size: 2).unwrap()
+  assert(past.items.len() == 0 && past.total == 5 && past.next_page == nil)
+  let empty = base.where_id(99).page(db, size: 2).unwrap()
+  assert(empty.items.len() == 0 && empty.total == 0 && empty.total_pages == 0 && empty.next_page == nil)
+  let filtered = base.where_rank(1).page(db, size: 1).unwrap()
+  assert(filtered.total == 2 && filtered.items[0].id == 3)
+  let labels = base.select(|entry| entry.note).page(db, size: 3).unwrap()
+  assert(labels.items.len() == 3 && labels.items[0] == nil && labels.items[1] == "two" && labels.items[2] == nil)
+  assert(labels.total == 5 && labels.next_page == 2)
+  assert(base.plan.take == -1 && base.plan.skip == 0 && base.plan.ordering.len() == 0)
+  let planned = base.plan.for_page(2, 2).unwrap().select()
+  assert(planned.text.contains("entry_key") && planned.text.contains("ORDER BY"))
+  let extreme = base.plan.for_page(9223372036854775807, 1).unwrap()
+  assert(extreme.skip == 9223372036854775806)
+  expect_invalid_page(base.page(db, number: 0))
+  expect_invalid_page(base.page(db, size: 0))
+  expect_invalid_page(base.page(db, size: -1))
+  expect_invalid_page(base.page(db, number: 9223372036854775807, size: 2))
+  expect_invalid_page(base.limit(0).page(db))
+  expect_invalid_page(base.offset(1).page(db))
+  expect_invalid_page(base.select(|entry| entry.note).limit(1).page(db))
+  expect_invalid_page(QueryPlan.new("manual", ["id"]).for_page(1, 2))
+}
+
+fn joined_pages(db: Database) {
+  let joined = Entry::query().left_join_bucket()
+  let first = joined.page(db, size: 2).unwrap()
+  assert(first.total == 7 && first.total_pages == 4)
+  assert(first.items[0].left.id == 1 && first.items[0].right?.id == 10)
+  assert(first.items[1].left.id == 1 && first.items[1].right?.id == 20)
+  let second = joined.page(db, number: 2, size: 2).unwrap()
+  assert(second.items[0].left.id == 2 && second.items[0].right == nil)
+  assert(second.items[1].left.id == 3 && second.items[1].right?.id == 30)
+  let last = joined.page(db, number: 4, size: 2).unwrap()
+  assert(last.items.len() == 1 && last.items[0].left.id == 5 && last.items[0].right?.id == 20)
+  let projected = joined.select(|entry, bucket| bucket?.name).page(db, number: 2, size: 2).unwrap()
+  assert(projected.items.len() == 2 && projected.items[0] == nil && projected.items[1] == "C")
+  let named = joined.on(|entry, bucket| bucket.name == "A").page(db, size: 10).unwrap()
+  assert(named.total == 5 && named.items.len() == 5)
+  assert(named.items[0].right?.name == "A" && named.items[2].right == nil)
+  let inner = Entry::query().inner_join_bucket().page(db, size: 10).unwrap()
+  assert(inner.total == 5 && inner.items.len() == 5)
+  let filtered = joined.filter(|entry, bucket| entry.id > 1 && bucket?.name != nil).page(db, size: 2).unwrap()
+  assert(filtered.total == 3 && filtered.items[0].left.id == 3)
+  expect_invalid_page(joined.limit(2).page(db))
+  assert(joined.plan.ordering.len() == 0 && joined.plan.take == -1)
+}
+
+fn cursor_pages(db: Database) {
+  let base = Entry::query()
+  let first = base.cursor_page(db, size: 2).unwrap()
+  assert(first.items[0].id == 1 && first.items[1].id == 2 && first.has_next && first.next_cursor == 2)
+  let second = base.cursor_page(db, size: 2, after: first.next_cursor).unwrap()
+  assert(second.items[0].id == 3 && second.items[1].id == 4 && second.next_cursor == 4)
+  let last = base.cursor_page(db, size: 2, after: second.next_cursor).unwrap()
+  assert(last.items.len() == 1 && last.items[0].id == 5 && !last.has_next && last.next_cursor == nil)
+  let exact = base.where_id_lt(5).cursor_page(db, size: 2, after: 2).unwrap()
+  assert(exact.items.len() == 2 && !exact.has_next && exact.next_cursor == nil)
+  let reverse = base.cursor_page(db, size: 2, descending: true).unwrap()
+  assert(reverse.items[0].id == 5 && reverse.items[1].id == 4 && reverse.next_cursor == 4)
+  let previous = base.cursor_page(db, size: 2, after: reverse.next_cursor, descending: true).unwrap()
+  assert(previous.items[0].id == 3 && previous.items[1].id == 2 && previous.next_cursor == 2)
+  let empty = base.cursor_page(db, after: 99).unwrap()
+  assert(empty.items.len() == 0 && !empty.has_next && empty.next_cursor == nil)
+  let filtered = base.where_rank(1).cursor_page(db, size: 1).unwrap()
+  assert(filtered.items[0].id == 3 && filtered.next_cursor == 3)
+  let a = Label::query().cursor_page(db, size: 1).unwrap()
+  let b = Label::query().cursor_page(db, size: 1, after: a.next_cursor).unwrap()
+  assert(a.items[0].id == "a" && a.next_cursor == "a" && b.items[0].id == "b")
+  let c = Label::query().cursor_page(db, size: 2, after: "c", descending: true).unwrap()
+  assert(c.items.len() == 2 && c.items[0].id == "b" && c.items[1].id == "a" && !c.has_next)
+  let statement = Label::query().plan.for_cursor("label_key", 2, "a' OR 1=1 --", false).unwrap().select()
+  assert(!statement.text.contains("OR 1=1") && statement.params[0] == "a' OR 1=1 --")
+  expect_invalid_page(base.cursor_page(db, size: 0))
+  expect_invalid_page(base.cursor_page(db, size: 9223372036854775807))
+  expect_invalid_page(base.limit(1).cursor_page(db))
+  expect_invalid_page(base.offset(1).cursor_page(db))
+  expect_invalid_page(base.order_by_id().cursor_page(db))
+  assert(base.plan.take == -1 && base.plan.ordering.len() == 0 && base.plan.filters == nil)
+}
+
+fn exercise_pagination() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  seed(db)
+  presence_reads(db)
+  numbered_pages(db)
+  joined_pages(db)
+  cursor_pages(db)
+}
+
+@test
+fn presence_and_pagination() { exercise_pagination() }
+
+exercise_pagination()
+print("orm presence and pagination: ok")
+
+fn expect_field_decode<T>(result: Result<T, OrmError>) {
+  match result {
+    .Err(.FieldDecode(details)) => assert(details.model == "Entry" && details.field == "rank"),
+    _ => panic("expected the original decoding error"),
+  }
+}
+
+fn exercise_page_decoding() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  Bucket::create_table(db).unwrap()
+  db.execute("CREATE TABLE page_entries (entry_key INTEGER PRIMARY KEY, rank, note TEXT, bucket_code INTEGER)").unwrap()
+  db.execute("INSERT INTO page_entries VALUES (1, 0, NULL, NULL), (2, 'bad', NULL, NULL)").unwrap()
+  // An unreturned lookahead row must not be decoded prematurely.
+  let first = Entry::query().cursor_page(db, size: 1).unwrap()
+  assert(first.items[0].id == 1 && first.has_next && first.next_cursor == 1)
+  expect_field_decode(Entry::query().cursor_page(db, size: 1, after: first.next_cursor))
+  expect_field_decode(Entry::query().page(db, number: 2, size: 1))
+  expect_field_decode(Entry::query().where_id(2).select(|entry| entry.rank).first_or_error(db))
+  expect_field_decode(Entry::query().where_id(2).left_join_bucket().first_or_error(db))
+}
+
+@test
+fn pagination_preserves_decode_errors() { exercise_page_decoding() }
+
+exercise_page_decoding()

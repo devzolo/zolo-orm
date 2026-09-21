@@ -1,0 +1,15 @@
+//! Imported model exercises public computed readers without field-reader collisions.
+use orm::Model
+
+@derive(Model)
+@model(table: "aggregate_sales")
+pub struct Sale {
+  @model(primary_key: true)
+  pub id: int,
+  pub category: str,
+  pub units: int,
+  pub price: float,
+  pub note: str?,
+  pub scalar_int: int = 0,
+  pub scalar_optional_int: int? = nil,
+}

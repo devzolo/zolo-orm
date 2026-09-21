@@ -1,0 +1,4 @@
+use orm::Query
+use dx_fixture::Item
+@derive(Query)
+struct View { item: Item?, }

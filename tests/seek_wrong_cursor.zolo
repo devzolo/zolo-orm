@@ -1,0 +1,5 @@
+use std::database::Database
+use dx_fixture::Item
+
+let db = Database.open("sqlite://:memory:").unwrap()
+let result = Item::query().seek_page(db, after: 42)

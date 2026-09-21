@@ -1,0 +1,48 @@
+//! Multi-source reads retain LEFT presence, source aliases, paging and ON bindings.
+use std::database::Database
+use composed_views::{Directory as Summary, Employed, seed_directory}
+
+fn exercise_composed_queries() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  seed_directory(db).unwrap()
+  let base = Summary::query()
+  let page = base.page(db, size: 2).unwrap()
+  assert(page.total == 4 && page.items[0].person.id == 1 && page.items[1].person.id == 2)
+  assert(page.items[0].team?.name == "Compiler" && page.items[0].organization?.name == "Zolo")
+  assert(page.items[0].manager == nil && page.items[1].manager?.name == "Ana")
+  let rest = base.page(db, number: 2, size: 2).unwrap()
+  assert(rest.items[0].team?.name == "Independent" && rest.items[0].organization == nil)
+  assert(rest.items[1].team == nil && rest.items[1].organization == nil && rest.items[1].manager == nil)
+  assert(Employed::query().count(db).unwrap() == 2)
+
+  let names = base.order_by_person_id().select(|person, team, organization, manager|
+    (person.name, team?.name, organization?.name, manager?.name)
+  ).all(db).unwrap()
+  assert(names.len() == 4 && names[1][3] == "Ana" && names[3][1] == nil)
+  let organization = "Zolo"
+  assert(base.filter(|person, team, organization_row, manager|
+    organization_row?.name == organization
+  ).count(db).unwrap() == 2)
+  let manager_name = "Nobody"
+  let minimum = 1
+  let restricted = base.on(|person, team, organization_row, manager|
+    manager.name == manager_name && team?.id != nil
+  ).filter(|person, team, organization_row, manager| person.id >= minimum)
+  let statement = restricted.statement()
+  assert(statement.params.len() == 2 && statement.params[0] == manager_name && statement.params[1] == minimum)
+  let rows = restricted.all(db).unwrap()
+  assert(rows.len() == 4)
+  for row in rows { assert(row.manager == nil) }
+  assert(base.count(db).unwrap() == 4)
+  assert(base.limit(0).first_row(db).unwrap() == nil)
+  assert(base.filter(|person, team, organization_row, manager| person.id == 4)
+    .select(|person, team, organization_row, manager| organization_row?.name)
+    .first_or_error(db).unwrap() == nil)
+}
+
+@test
+fn composed_queries_preserve_sources() { exercise_composed_queries() }
+
+exercise_composed_queries()
+print("orm composed queries: ok")

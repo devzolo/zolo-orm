@@ -1,0 +1,5 @@
+use orm::Model
+@derive(Model)
+@model(primary_key: [Entry.tenant_id, Entry.id])
+struct Entry { tenant_id: int, id: int, name: str }
+Entry::changes(tenant_id: 2)

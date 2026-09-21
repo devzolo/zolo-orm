@@ -1,0 +1,83 @@
+//! Domain codecs cover CRUD, patches, projections, captured filters and upserts.
+use std::database::Database
+use orm::{OrmError, Statement}
+use domain_models::{Account, AccountInsert, AccountLink, AccountDirectory, State, Email, Credits}
+
+fn expect_bad_state<T>(result: Result<T, OrmError>) {
+  match result {
+    .Err(.FieldDecode(error)) => { assert(error.model == "Account" && error.field == "state") },
+    _ => panic("expected contextual state decode error"),
+  }
+}
+
+fn exercise_domain_codecs() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  Account::create_table(db).unwrap()
+  assert(Account::schema_sql().contains("\"email\" TEXT NOT NULL"))
+  assert(Account::schema_sql().contains("\"credits\" BIGINT NOT NULL"))
+  let email = Email.new("ana@example.test")
+  let created = Account::create(db, id: 1, email, credits: Credits.new(10)).unwrap()
+  assert(created.email.unwrap() == "ana@example.test" && created.state == State::Active)
+  assert(created.previous_state == nil && created.credits.unwrap() == 10)
+  let active = State::Active
+  let statement = Account::query().filter(|account| account.state == active).statement()
+  assert(statement.params[0] == "active")
+  assert(Account::query().where_email(email).first_or_error(db).unwrap().id == 1)
+  assert(Account::query().where_state_in([State::Active]).count(db).unwrap() == 1)
+  assert(Account::query().filter(|account| account.email == email).exists(db).unwrap())
+  let states: [State?] = Account::query().select(|account| account.previous_state).all(db).unwrap()
+  assert(states.len() == 1 && states[0] == nil)
+  Account::changes(state: State::Disabled, previous_state: State::Active, credits: Credits.new(0)).apply(db, 1).unwrap()
+  let disabled = Account::find_or_error(db, 1).unwrap()
+  assert(disabled.state == State::Disabled && disabled.previous_state == State::Active)
+  assert(disabled.credits.unwrap() == 0)
+  Account::changes(previous_state: nil).apply(db, 1).unwrap()
+  assert(Account::query().where_previous_state(nil).count(db).unwrap() == 1)
+  assert(Account::query().filter(|account| account.previous_state == nil).count(db).unwrap() == 1)
+
+  Account.new(2, Email.new("b@example.test"), State::Active, nil, Credits.new(20)).insert(db).unwrap()
+  Account::insert_many(db, [
+    Account.new(3, Email.new("c@example.test"), State::Active, nil, Credits.new(30)),
+    Account.new(4, Email.new("d@example.test"), State::Disabled, State::Active, Credits.new(40)),
+  ]).unwrap()
+  Account.new(2, Email.new("b@example.test"), State::Disabled, nil, Credits.new(21)).update(db).unwrap()
+  let input = AccountInsert {
+    id: 9, email, state: State::Active, previous_state: nil, credits: Credits.new(999),
+  }
+  let changed = Account::upsert_by_index_by_email(db, input, Account::changes(credits: Credits.new(8))).unwrap()
+    ?? panic("expected an existing account")
+  assert(changed.id == 1 && changed.credits.unwrap() == 8 && changed.state == State::Disabled)
+  let page = Account::query().select(|account| account.email).page(db, size: 2).unwrap()
+  assert(page.items[0].unwrap() == "ana@example.test" && page.total == 4)
+  let disabled_rows = Account::query().where_state_not(State::Active).all(db).unwrap()
+  assert(disabled_rows.len() == 3)
+  AccountLink::create_table(db).unwrap()
+  AccountLink::create(db, id: 10, account_id: 1).unwrap()
+  AccountLink::create(db, id: 11, account_id: nil, row: State::Disabled).unwrap()
+  AccountLink.new(12, 2, State::Active).insert(db).unwrap()
+  AccountLink::changes(row: State::Disabled).apply(db, 10).unwrap()
+  let disabled_state = State::Disabled
+  let joined = AccountLink::query().left_join_account_id()
+    .filter(|link, account| account?.state == disabled_state)
+    .select(|link, account| (link.row, account?.email)).all(db).unwrap()
+  assert(joined.len() == 2)
+  let same_state = AccountDirectory::query()
+    .filter(|link, account| link.row == account?.state)
+    .select(|link, account| (link.row, account?.credits)).all(db).unwrap()
+  assert(same_state.len() == 1 && same_state[0][0] == State::Disabled)
+  let absent = AccountDirectory::query().filter(|link, account| link.id == 11)
+    .select(|link, account| account?.email).first_row(db).unwrap()
+    ?? panic("expected the unmatched link")
+  assert(absent.value == nil)
+
+  Statement.new("UPDATE domain_accounts SET state = ? WHERE id = ?", ["invalid secret", 1]).execute(db).unwrap()
+  expect_bad_state(Account::find_or_error(db, 1))
+  expect_bad_state(Account::query().where_id(1).select(|account| account.state).first_or_error(db))
+}
+
+@test
+fn codecs_keep_domain_types() { exercise_domain_codecs() }
+
+exercise_domain_codecs()
+print("orm domain codecs: ok")

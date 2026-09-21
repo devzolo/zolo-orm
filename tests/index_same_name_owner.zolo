@@ -1,0 +1,5 @@
+use orm::Model
+use index_foreign_models::Item as Other
+@derive(Model)
+@model(indexes: #{by_id: [Other.id]})
+struct Item { @model(primary_key: true) id: int, }

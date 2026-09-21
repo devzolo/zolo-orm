@@ -1,0 +1,6 @@
+use orm::Model
+@derive(Model)
+@model(primary_key: [Entry.id], advanced_indexes: #{
+  name: #{terms: [#{field: Entry.name}], condition: []}
+})
+struct Entry { id: int, name: str }

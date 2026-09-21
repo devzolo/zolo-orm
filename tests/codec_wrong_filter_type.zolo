@@ -1,0 +1,2 @@
+use dx_fixture::Item
+Item::query().where_state("active")

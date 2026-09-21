@@ -1,0 +1,6 @@
+use orm::Model
+@derive(Model)
+@model(primary_key: [Entry.id], advanced_indexes: #{
+  number: #{terms: [#{field: Entry.id, transform: .Lower}]}
+})
+struct Entry { id: int }

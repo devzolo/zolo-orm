@@ -68,10 +68,26 @@ checks it against the model's schema metadata, and rewrites it into structured
 predicates or a column list plus a typed decoder. Unsupported expressions are
 rejected at that point.
 
-`first_or_error` delegates to `first`, so it preserves the query's ordering and
-offset, its zero-limit fast path, and its database/decoding failures. Only an
-absent row becomes `NotFound` with the source model name. `find_or_error`
-builds a primary-key predicate and uses the same required-read path.
+`first_row` checks the returned row count before wrapping a decoded value in
+`Row<T>`. A nullable scalar therefore remains a present row even when its value
+is nil. Model `first_or_error` delegates to `first`; projection and joined
+required reads use `first_row`. Only absence becomes `NotFound` with the source
+model name. These paths preserve ordering, offset, zero limits and decoder
+failures. `find_or_error` uses the model's required-read path.
+
+Every plan copy preserves its source model name and pagination keys. Numbered
+pages validate positive bounds and checked offset arithmetic, then append key
+ordering on a fresh plan. Joined queries supply every source's qualified primary key,
+which make ordering deterministic when one left row has several matches.
+Projections keep these keys as plan metadata without changing their result
+shape. A count and a select produce `Page<T>` without an implicit transaction.
+
+Integer and string primary keys also generate `cursor_page`. It owns primary-key
+ordering, adds an exclusive bound and requests one lookahead row. Only emitted
+rows are decoded; the lookahead determines continuation without creating a
+decoder failure for an item outside the page. `CursorPage<T, K>` keeps the
+key's type and exposes no total. Existing order/limit/nonzero offset is rejected
+instead of silently replaced.
 
 `count` and `exists` operate on matching records independently of ordering and
 pagination. The `exists` statement kind renders `SELECT 1 AS "orm_exists" FROM
@@ -108,6 +124,15 @@ decoded into the model.
 setting it are different states, so a patch can write NULL. Applying an empty
 patch directly with `apply` issues no SQL.
 
+`Model::changes(field: value)` builds that same patch through generated typed
+setters. Each argument is a union of its field type with a distinct `Unchanged`
+marker, whose default represents omission. Optional nil remains a value to
+write, and construction defaults are never evaluated. Positive nominal type
+guards narrow domain types before setter calls; aliases retain their declaration
+identity. The helper constructing the empty plan lives outside the named
+argument scope.
+
+
 Decoders use complete struct literals, so a database NULL can never be replaced
 by the field's construction default. SQLite booleans are accepted as `bool` or
 as the integers 0 and 1; other numeric probes use Zolo's checked conversions.
@@ -117,9 +142,12 @@ the rejected value.
 ## Indexes, foreign keys and upsert
 
 Type-level `indexes` and `unique_indexes` are maps from a logical name to an
-ordered field list. Field-level `index` is shorthand for one such index. The
-derive validates names, duplicate fields and field existence before converting
-logical fields to quoted SQL columns. Schema statements are deterministic and
+ordered `FieldRef` list. Field-level `index` is shorthand for one such index.
+The derive compares each reference's owner identity against `TypeInfo.identity`,
+then validates names and duplicate fields before converting logical fields to
+quoted SQL columns. Aliases preserve identity and unrelated same-name
+declarations remain distinct. The attribute schema recursively materializes
+references inside the maps and arrays, in both `opts` and authored decorators. Schema statements are deterministic and
 shared by `schema_sql`, `schema_statements`, `create_table` and the compiler's
 `@sql_schema(ddl)` metadata. Migrations consume the same DDL.
 
@@ -130,8 +158,10 @@ The ORM checks that an explicit field belongs to the same target declaration;
 aliases of that declaration remain equivalent. `ForeignKeyAction` enum values
 encode referential actions. This preserves the producer's executable lexical
 scope. The ORM reads the
-referenced model's raw decorators to resolve its canonical table, column and
-unique-key status. It validates the field types and referential actions before
+referenced model's decorators to resolve its canonical table, column and
+unique-key status, including a one-field named UNIQUE index. Reflected
+decorators resolve in the model's defining scope; references encountered there
+carry shallow metadata so self references and relation cycles terminate. It validates the field types and referential actions before
 emitting REFERENCES. A loader alone retains its earlier behavior and produces
 no foreign-key DDL.
 
@@ -180,9 +210,12 @@ and never runs when a field is accessed, which rules out hidden N+1 queries.
 - `OrmError.UnsafeMutation` rejects deletes that are ambiguous: no filter, or a
   filter combined with ordering or pagination.
 - `OrmError.Unsupported` reports runtimes without database support.
+- `OrmError.InvalidPagination` reports invalid numbered/cursor page bounds,
+  overflow or incompatible query state before database execution.
 
-Invalid model declarations are compile errors. Invalid pagination or batch
-configuration is treated as a programmer error.
+Invalid model declarations are compile errors. Numbered and cursor page errors
+are recoverable. The lower-level negative `limit`/`offset` and invalid batch
+configuration remain programmer errors.
 
 ## Compiler and editor contract
 
@@ -204,14 +237,102 @@ projection decoders select this field under an internal alias to distinguish
 an absent row from a malformed matched row. Readers accept the selected column
 alias while preserving the original model/field error context.
 
-A relation view uses `sql_schema(query_only: true)`. Its columns participate
-in query validation and editor tooling, but it contributes no physical table
-or DDL to migration discovery. The compiler does not depend on this package's
-name. Imported projections call reader methods on the real exported model,
-never the synthetic schema names used only during analysis.
+Query-only schemas contribute no physical table or DDL to migration discovery.
+A source may instead name a model through `source`; its canonical published
+schema provides the fields, including logical domain types. The outer query's
+`source` can identify its result view as an import anchor without claiming
+ownership of any table.
+
+Imported projections call reader methods on an exported runtime model or view.
+Generated proxy methods forward to the original model in its defining scope,
+so private aliases and codecs are never transplanted into the consumer.
+Their inferred return signatures carry logical values and error types through
+local analysis and imported interfaces. Source metadata includes a reader prefix
+and an encoder prefix to keep repeated model sources independent.
 
 `QueryPlan` stores relation predicates and WHERE filters independently.
 The shared SQL AST builder quotes source aliases and column identifiers
 separately, renders ON before WHERE, and emits placeholders in that order.
 Count and existence retain the joined relation while discarding ordering and
 pagination. A joined mutation is rejected rather than inferred.
+
+## Composed query views
+
+The separate `Query` derive builds a read-only view with one through sixteen
+model sources. The first source is required; each subsequent source declares a
+prior view field and two model field references. Canonical owner identity
+rejects wrong-source references before SQL emission. Required sources use INNER
+joins and optional sources LEFT joins; codec join keys are rejected.
+
+Internal aliases use source ordinals, and projected row aliases use source and
+field ordinals. Full reads reconstruct each model's raw row and call its own
+decoder. Optional source presence is detected from its nonoptional primary key.
+The declared view gives every decoded model a stable result field, including
+repeated models in self joins.
+
+Filter/select lambdas use declaration order. ON lambdas require only the final
+source: earlier LEFT sources remain optional. The shared plan applies added ON
+predicates to the last join and binds them before WHERE. Numbered pages retain
+all source keys to order joined rows deterministically.
+
+## Logical types and storage codecs
+
+Codec fields publish their logical type plus physical `storage`, an `encoder`
+method name and canonical `codec` identity in `sql_column` metadata.
+SQL literals and migration schemas use storage types. Captured queries use the
+logical type for argument checking and decoder results, inserting a call to the
+exported encoder before binding values. Nullable encoder wrappers bypass nil.
+
+All generated write paths use the same typed encoder wrapper; generated readers
+decode a checked scalar and translate codec failures to contextual
+`FieldDecode` errors. Codecs can stay private to the model's module. Inferred
+proxy signatures and canonical enum/newtype import identities preserve the
+public field contract across aliases and facades.
+
+Equality and IN encode domain values. Column comparisons also require matching
+logical nominal identity, codec identity and storage. Range/string/truthiness
+capture and generated ordering/range methods are unavailable for codec fields.
+Primary/relation keys remain ordinary scalars. These rules avoid assuming
+an ordering or key representation that the codec contract does not promise.
+
+## Advanced query and cursor protocol
+
+`QueryPlan` retains projection bindings, grouping columns, HAVING predicates and
+whether a projection was explicitly selected. Every immutable query operation
+preserves these fields. Computed selections lower to the SQL builder's typed
+expression tree. The library binds SELECT values before ON/WHERE/HAVING values.
+Count/exists wrap grouped/computed selections when necessary so group cardinality
+and projection placeholders retain their meaning. Generated public model/view
+methods with the `__orm_scalar_` prefix decode computed scalar results without
+colliding with ordinary `read_FIELD` readers.
+
+The `Sql` type opts aggregate markers into capture with `sql_aggregates`.
+The compiler remains independent of the ORM package name, and scalar reader
+owners survive imports/reexports. Division promotes real arithmetic and handles
+zero through NULL; the SQL transpiler retains decimal notation for integral real
+literals. Group validation rejects free columns outside grouping keys.
+
+`seek_page` reuses `Projection<T>` decoding for models, joins and result views.
+`cursor.zolo` canonicalizes column identities, appends all source key parts,
+selects hidden order values under collision-free aliases, and builds a null-aware
+lexicographic continuation predicate. It snapshots scope bindings, including
+copied binary bytes, and compares the statement shape on resume. The token is an
+application value, not an external signed token or database snapshot.
+
+## Domains and schema descriptors
+
+`codecs.zolo` supplies validated Date/Timestamp/ExactDecimal domains and codecs;
+binary data uses std::database::Blob and physical bytes. Nullable codec fields
+bypass encode/decode for SQL NULL. Binary bridges distinguish blobs from text and
+arrays and preserve empty data and embedded zero bytes.
+
+Model primary-key lists retain declaration order. Composite keys generate a
+ModelKey used by CRUD and patches, and all key parts become page tie-breakers.
+Foreign-key descriptors preserve ordered local/reference pairs. Advanced indexes
+use typed column references with explicit transforms, directions and NULL/boolean
+predicates. Migrations must retain those semantics when reading and comparing
+the SQLite catalog, rather than flattening expressions to column names.
+
+This batch is source development only: compiler/LSP/database/migration/ORM
+regression sources are written, while compilation, execution, runtime/editor
+refresh and publication remain pending.

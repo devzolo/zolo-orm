@@ -1,0 +1,71 @@
+//! A reusable result view can follow several relationships and repeat a model.
+use std::database::Database
+use orm::{Model, Query, OrmError}
+
+@derive(Model)
+@model(table: "view_organizations")
+pub struct Organization {
+  @model(primary_key: true, column: "organization_key")
+  pub id: int,
+  pub name: str,
+}
+@derive(Model)
+@model(table: "view_teams")
+pub struct Team {
+  @model(primary_key: true, column: "team_key")
+  pub id: int,
+  @model(belongs_to: Organization)
+  pub organization_id: int?,
+  pub name: str,
+}
+@derive(Model)
+@model(table: "view_people")
+pub struct Person {
+  @model(primary_key: true, column: "person_key")
+  pub id: int,
+  @model(belongs_to: Team, column: "team_code")
+  pub team_id: int?,
+  @model(belongs_to: Person)
+  pub manager_id: int?,
+  pub name: str,
+}
+
+@derive(Query)
+pub struct Directory {
+  pub person: Person,
+  @join(from: Directory.person, key: Person.team_id, references: Team.id)
+  pub team: Team?,
+  @join(from: Directory.team, key: Team.organization_id, references: Organization.id)
+  pub organization: Organization?,
+  @join(from: Directory.person, key: Person.manager_id, references: Person.id)
+  pub manager: Person?,
+}
+
+@derive(Query)
+pub struct Employed {
+  pub person: Person,
+  @join(from: Employed.person, key: Person.team_id, references: Team.id)
+  pub team: Team,
+  @join(from: Employed.team, key: Team.organization_id, references: Organization.id)
+  pub organization: Organization,
+}
+
+pub fn seed_directory(db: Database) -> Result<int, OrmError> {
+  Organization::create_table(db)?
+  Team::create_table(db)?
+  Person::create_table(db)?
+  Organization::create(db, id: 1, name: "Zolo")?
+  Team::create(db, id: 10, organization_id: 1, name: "Compiler")?
+  Team::create(db, id: 20, organization_id: nil, name: "Independent")?
+  let inserted = Person::insert_many(db, [
+    Person.new(3, 20, 1, "Carla"),
+    Person.new(1, 10, nil, "Ana"),
+    Person.new(4, nil, nil, "Davi"),
+    Person.new(2, 10, 1, "Bruno"),
+  ])?
+  // Local projections need the same inferred reader contract as imported views.
+  let ids: [int] = Directory::query()
+    .select(|person, team, organization, manager| person.id).all(db)?
+  assert(ids.len() == 4)
+  return Result::Ok(inserted)
+}

@@ -7,8 +7,10 @@ The snippets extend the User model in [basic.zolo](../examples/basic.zolo).
 ## Models
 
 A model is an ordinary struct. Fields may be `int`, `float`, `str`, `bool` or
-the optional form of any of them. Every model declares exactly one primary key,
-and it cannot be optional.
+the optional form of any of them. A [domain codec](domain-codecs.md) maps other
+types, including enums and newtypes, to scalar storage. Every model declares
+a primary key, whose fields cannot be optional or use codecs. Use a field flag
+for a single key or a type-level list for a [composite key](advanced-schemas.md).
 
 ```rust
 fn default_availability() -> bool { true }
@@ -27,8 +29,8 @@ Field options:
 
 | Option | Meaning |
 | --- | --- |
-| `primary_key: true` | The row key. Required on exactly one field. |
-| `generated: true` | Let SQLite allocate the key. Integer keys only. |
+| `primary_key: true` | The single-field row key; alternatively declare a type-level primary_key list. |
+| `generated: true` | Let SQLite allocate the key. Single-field integer keys only. |
 | `unique: true` | Adds a UNIQUE constraint and a typed `upsert_by_FIELD` method. |
 | `index: true` | Adds a named index on this field. |
 | `column: "name"` | Maps the field to a different SQL column. |
@@ -36,6 +38,8 @@ Field options:
 | `references: Parent.field` | A field reference on the same parent type; defaults to `id`. |
 | `foreign_key: true` | Adds an enforced foreign key for the declared relation. |
 | `on_delete` / `on_update` | `.NoAction`, `.Restrict`, `.Cascade`, `.SetNull` or `.SetDefault`; require `foreign_key: true`. |
+| `codec: DomainCodec` | Converts a logical field type to scalar storage; a real type reference. |
+| `storage` | Codec storage: `.Text` (default), `.Integer`, `.Real`, `.Boolean` or `.Binary`. |
 | `default_sql: "literal"` | A database default used by schema tooling; construction defaults remain application-side. |
 
 Without `generated: true` the application supplies every key. Generated keys use
@@ -54,15 +58,33 @@ the supplied connection and can run inside an existing transaction.
 ## Indexes and conflict targets
 
 A field can opt into `@model(index: true)`. For composite indexes, declare
-named lists of logical fields on the model:
+named lists of field references on the model:
 
 ```rust
+@derive(Model)
 @model(
   table: "members",
-  indexes: #{by_name: ["name", "tenant_id"]},
-  unique_indexes: #{tenant_email: ["tenant_id", "email"]},
+  indexes: #{by_name: [Member.name, Member.tenant_id]},
+  unique_indexes: #{tenant_email: [Member.tenant_id, Member.email]},
 )
+struct Member {
+  @model(primary_key: true)
+  id: int,
+  tenant_id: int,
+  name: str,
+  @model(column: "email_address")
+  email: str,
+}
 ```
+
+Each reference must belong to the annotated model's declaration. Imported
+aliases keep that identity; an unrelated type with the same name does not.
+The editor can navigate and rename the referenced fields. Index labels such
+as `tenant_email` and physical `table`/`column` names remain strings.
+
+When upgrading, replace `["tenant_id", "email"]` with
+`[Member.tenant_id, Member.email]`. Field-name strings in index lists are
+rejected; `@model(index: true)` on an individual field is unchanged.
 
 The derive converts those fields through their `column` mappings and quotes
 every SQL identifier. Index names are `zolo_<table-length>_<table>_<name>_idx` or
@@ -73,7 +95,8 @@ names are compile errors. Named maps are emitted in key order.
 
 Primary keys, `unique: true` fields and `unique_indexes` declare the only
 available typed upsert targets. A normal index does not make a field unique.
-See [schema_writes.zolo](../examples/schema_writes.zolo) for a complete model with
+See [typed_indexes.zolo](../examples/typed_indexes.zolo) for the short walkthrough
+and [schema_writes.zolo](../examples/schema_writes.zolo) for a complete model with
 mapped columns, ordinary indexes and a composite unique key.
 
 ## Creating and updating rows
@@ -103,7 +126,7 @@ are left untouched. `set_note(nil)` writes NULL. Applying an empty patch does
 nothing and returns zero. Primary keys have no setter.
 
 ```rust
-User::changes().set_note(nil).set_active(false).apply(db, user.id)?
+User::changes(note: nil, active: false).apply(db, user.id)?
 ```
 
 `User::find(db, key)` returns `Result<User?, OrmError>`. Use
@@ -116,13 +139,36 @@ let user = User::find_or_error(db, 1)?
 User::changes().set_note("Reviewed").apply(db, user.id)?
 ```
 
+## Named patches
+
+```rust
+let patch = User::changes(name: "Ana Maria", note: nil, active: false)
+patch.apply(db, user.id)?
+let with_email = patch.set_email("ana@example.com")
+```
+
+Every non-key field is an optional named argument to `changes`. Omitting it
+means unchanged, even if the model has a construction default. Explicit nil
+clears an optional field; false, zero and empty strings are ordinary values.
+Wrong types, unknown field names and nil for required fields are compile errors.
+
+`changes()` still produces an empty patch, and the existing typed setters can
+extend it. Both forms return the same immutable `ModelChanges` value, usable
+by `apply` and upserts. A later setter replaces an earlier assignment without
+mutating the original patch. Primary keys have neither an argument nor a setter.
+
+Internally, a distinct `Unchanged` marker represents omission. It is never
+sent to SQL, and application code does not need to construct it. See
+[named_patches.zolo](../examples/named_patches.zolo) for default side effects,
+explicit NULL, false/zero/empty values and reuse.
+
 ## Defaults, NULL and unchanged fields
 
 | Intent | Create / insert input | Patch |
 | --- | --- | --- |
 | Use the construction default | Omit the field/argument. | Defaults never apply to a patch. |
-| Store SQL NULL in an optional field | Pass `nil`. | Call `set_FIELD(nil)`. |
-| Preserve the stored value | Not an insertion operation. | Do not call that field's setter. |
+| Store SQL NULL in an optional field | Pass `nil`. | Pass `field: nil` or call `set_FIELD(nil)`. |
+| Preserve the stored value | Not an insertion operation. | Omit its argument and setter. |
 
 An optional field with no explicit default starts as NULL. `default_sql`
 declares a database default for schema tooling and referential actions; it does
@@ -143,7 +189,7 @@ name if a model field would shadow it, just as it does for schema helpers.
 
 ```rust
 let input = UserInsert { name: "Ana", email: "ana@example.com" }
-let patch = User::changes().set_note("Seen today")
+let patch = User::changes(note: "Seen today")
 let stored = User::upsert_by_email(db, input, patch)?
 ```
 
@@ -154,8 +200,8 @@ model, and unknown targets or a different model's input/patch fail to compile.
 
 The operation is one `INSERT ... ON CONFLICT (target) ... RETURNING` statement.
 The insert path uses the input and its defaults. The conflict path applies only
-the explicit patch: omitted setters leave existing data intact, and a setter
-with `nil` writes SQL NULL. Primary keys have no patch setter. Constraint
+the explicit patch: omitted fields leave existing data intact, and an explicit
+`nil` writes SQL NULL. Primary keys have no patch setter. Constraint
 failures outside the chosen target, and failures caused by the patch itself,
 remain typed database errors.
 

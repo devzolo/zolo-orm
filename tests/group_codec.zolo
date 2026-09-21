@@ -1,0 +1,2 @@
+use dx_fixture::Item
+let query = Item::query().group_by(|item| item.state)

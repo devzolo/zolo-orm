@@ -1,6 +1,6 @@
 # Migrations
 
-[Documentation](README.md) Â· [Runnable migration demo](../examples/migration_demo/README.md)
+[Documentation](README.md) · [Runnable migration demo](../examples/migration_demo/README.md)
 
 Migrations turn model changes into reviewed SQL and keep an applied history.
 Use them for persistent databases; `create_table` only creates missing objects
@@ -105,8 +105,8 @@ zolo db check --url sqlite://tutorial.db
 ```
 
 The generator writes both directions: create a replacement table, copy the
-shared columns, replace the original, then recreate indexes. The primary-key
-name, type and generated identity must stay unchanged. A UNIQUE constraint
+shared columns, replace the original, then recreate indexes. The ordered primary-key
+columns, their types and generated identity must stay unchanged. A UNIQUE constraint
 checks existing duplicates; making a column required checks existing NULLs.
 A SQL default applies to newly added columns and future inserts; it does not
 silently repair existing NULLs.
@@ -141,14 +141,14 @@ before migration, after migration and after rollback.
 | Change | Behavior |
 | --- | --- |
 | New models with foreign keys | Creates parents before children; rollback drops children first. |
-| Index addition, removal or replacement | Generates reversible SQL. |
+| Index addition, removal or replacement | Generates reversible SQL for supported plain, directional, expression and partial indexes. |
 | Nullable column, or required column with a SQL default | Adds the column; UNIQUE additions require `--allow-rebuild`. |
 | Existing column type, nullability, SQL default or uniqueness | Requires `--allow-rebuild` and compatible existing data. |
 | Foreign-key actions or table UNIQUE constraints | Requires `--allow-rebuild`; validates the resulting relations. |
 | DROP TABLE or DROP COLUMN | Requires `--allow-destructive`; constrained columns also require a rebuild. |
 | Dropping a required column without a SQL default | Refused because its definition cannot be restored for existing rows. |
 | New required column without a SQL default | Refused; provide a backfill default first. |
-| Changing primary-key name, type or generated identity | Refused by automatic rebuild. |
+| Changing primary-key columns, order, types or generated identity | Refused by automatic rebuild. |
 | Cyclic foreign-key graph | Refused by automatic generation. |
 
 `--allow-destructive` permits removing data; rollback restores a dropped
@@ -159,9 +159,17 @@ your application.
 Automatic rebuilds refuse custom views and triggers, generated SQL columns,
 CHECK constraints, custom collations, AUTOINCREMENT, STRICT/WITHOUT ROWID,
 named constraints and other catalog details the snapshot cannot preserve.
-Inspection also rejects partial/expression/custom-collation indexes, deferred
-foreign keys and directional primary/UNIQUE constraints. Use an explicit,
-reviewed migration workflow for these schemas.
+Inspection preserves the supported index expressions and predicates described
+in [advanced schemas](advanced-schemas.md), along with each term's direction.
+Expressions outside that vocabulary, custom-collation indexes, deferred foreign
+keys and directional primary/UNIQUE constraints remain unsupported. Use an
+explicit, reviewed migration workflow for those schemas.
+
+Composite primary and foreign keys retain their declared order in snapshots
+and catalog checks. Existing scalar-key snapshots remain readable. A composite
+foreign key references one complete primary or UNIQUE key; an expression or
+partial UNIQUE index cannot serve as that target. Rebuilds preserve these
+constraints and recreate supported indexes after copying rows.
 
 Scripts must not contain `BEGIN`, `COMMIT`, `ROLLBACK` or other
 transaction-control statements: the runner owns the transaction around SQL

@@ -1,0 +1,5 @@
+use orm::Query
+use dx_fixture::{Item, Team}
+struct Other { item: Item, }
+@derive(Query)
+struct View { item: Item, @join(from: Other.item, key: Item.id, references: Team.id) team: Team?, }

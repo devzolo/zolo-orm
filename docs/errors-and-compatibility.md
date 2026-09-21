@@ -4,7 +4,7 @@
 
 ## Errors
 
-`OrmError` has six variants:
+`OrmError` has seven variants:
 
 | Variant | When |
 | --- | --- |
@@ -14,6 +14,7 @@
 | `FieldDecode(DecodeError)` | A field had an unexpected type. Carries model, field and expected type, never the value. |
 | `UnsafeMutation(str)` | A delete without a filter, or with ordering/pagination. |
 | `Unsupported(str)` | A runtime without database support. |
+| `InvalidPagination(str)` | Invalid page bounds, offset overflow or incompatible query ordering/pagination. |
 
 For SQLite constraint failures, match `OrmError.Database(cause)` and use
 `cause.is(DbErrorKind::UniqueViolation)` or `match cause.kind()`. Import
@@ -49,6 +50,12 @@ compile errors. For example, fields named `id` and `id_not` would both generate
 
 ## Compatibility
 
+The current advanced-feature development batch has source implementations and
+regression cases, but has not been compiled or executed. Runtime/editor refresh
+and publication are pending; the table below describes the intended platform
+scope, not a completed validation of this local batch.
+
+
 | Surface | Supported scope |
 | --- | --- |
 | Zolo VM + SQLite | ORM queries, writes, transactions and migrations. |
@@ -59,7 +66,11 @@ compile errors. For example, fields named `id` and `id_not` would both generate
 | wasm-aot | Language/reflection tests exist; full database-backed ORM execution is not supported. |
 
 The compiler must support structured query capture, `exists`, index/upsert SQL,
-generated sibling imports and consumer-visible derive reflection. Use a
+generated sibling imports and consumer-visible derive reflection, including
+nested `TypeRef`/`FieldRef` attribute containers and `TypeInfo.identity`.
+Named patches also rely on nominal type guards preserving imported aliases.
+Codec queries require logical/storage column metadata and composed views require
+multi-source query metadata, including transitive imports and exported readers. Use a
 matching CLI, runtime and language server. A newer package checkout cannot
 add those capabilities to an older compiler.
 
@@ -69,15 +80,29 @@ contains what has been published to that branch.
 
 ## Current boundaries
 
-- One nonoptional primary key per model. Composite primary/foreign keys,
-  chained/arbitrary joins and computed projections are not supported. One
-  typed INNER or LEFT belongs_to join per query is supported.
-- Columns support `int`, `float`, `str`, `bool` and their optional forms.
-  Decimal, timestamp and blob codecs are not provided.
-- Composite UNIQUE indexes and conflict targets are supported; expression,
-  partial and per-column directional ORM indexes are not generated.
-- Scalar projections preserve NULL slots. `first` on a nullable scalar returns
-  nil for both a NULL value and no row; project a required key with it to distinguish them.
+- Primary keys contain one or more nonoptional scalar fields. Composite keys
+  generate a named key type; composite foreign keys use ordered field references.
+  See [advanced schemas](advanced-schemas.md).
+- Relation helpers and [composed views](composed-queries.md) support INNER/LEFT
+  joins with scalar or composite equality keys. Each view has one through sixteen
+  sources; ON extends only the last join. No RIGHT/FULL joins or joined mutations.
+- [Computed selections and aggregates](aggregates.md) support numeric arithmetic,
+  count/sum/avg/min/max, grouping and HAVING. Nonaggregate selected fields must
+  be grouping keys; remainder and arbitrary SQL function calls are not captured.
+- Ordinary columns support int/float/str/bool and optional forms.
+  [Domain codecs](domain-codecs.md) additionally expose binary storage and
+  [built-in domains](builtin-codecs.md). Codec fields cannot be keys and do not
+  imply ordering, ranges or arithmetic; count_value can count their presence.
+- Advanced indexes support per-term direction, supported unary transforms and
+  conjunctions of typed NULL/boolean predicates. UNIQUE expression/partial
+  indexes do not generate upsert methods. See the exact [schema subset](advanced-schemas.md).
+- Scalar projections preserve NULL slots. first on a nullable scalar returns
+  nil for both NULL and no row; first_row distinguishes them, and first_or_error
+  accepts a present NULL.
+- Numbered pages cover models, projections, joins and grouped reports.
+  The scalar cursor_page shorthand retains its int/str key contract. seek_page
+  supports several ordering fields and joined/projected results; it rejects
+  grouped/aggregate results and accepts at most 24 ordering terms including keys.
 - No streaming API, async execution, prepared-statement cache or connection pool.
 - Reviewed SQLite rebuilds require `--allow-rebuild` and preserve primary-key
   identity and compatible data. Lossy casts and unsupported schema objects are
@@ -94,6 +119,7 @@ contains what has been published to that branch.
 | CLI succeeds but editor reports missing generated types | Refresh the matching language server/extension, then reload the editor window. |
 | A filter expression is rejected | Use supported comparisons/string operations and compute other values outside the lambda. |
 | `NotFound` when no record is expected | Use `find`/`first` for optional results; reserve `*_or_error` for a required row. |
+| `InvalidPagination` | Use positive page bounds and remove an existing limit/nonzero offset; cursor pages also choose their own key ordering. |
 | Upsert returns `nil` | An empty patch plus a matching key means DO NOTHING; use a nonempty patch if an update is intended. |
 | A UNIQUE error survives upsert | It may come from another key or the patch; only the named conflict target is handled. |
 | A foreign-key error occurs | Create the parent first and check the key/action. Loading metadata alone is not enforcement. |

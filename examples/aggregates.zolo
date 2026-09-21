@@ -1,0 +1,66 @@
+//! Computed projections, nullable aggregates and group-aware paging.
+use std::database::Database
+use orm::Sql as Stats
+use aggregate_models::Sale
+
+
+fn exercise_aggregates() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  Sale::create_table(db).unwrap()
+  Sale::insert_many(db, [
+    Sale.new(1, "books", 2, 10.0, nil),
+    Sale.new(2, "books", 3, 20.0, "gift"),
+    Sale.new(3, "games", 1, 50.0, nil),
+  ]).unwrap()
+
+  let multiplier = 2
+  let values: [int] = Sale::query().order_by_id()
+    .select(|sale| sale.units * multiplier + 1).all(db).unwrap()
+  assert(values.len() == 3 && values[0] == 5 && values[1] == 7)
+
+  let stats = Sale::query().select(|sale|
+    (Stats::count(), Stats::count_value(sale.note), Stats::sum(sale.units),
+      Stats::avg(sale.price), Stats::min(sale.price), Stats::max(sale.price))
+  ).first_or_error(db).unwrap()
+  assert(stats[0] == 3 && stats[1] == 1 && stats[2] == 6)
+  assert(stats[3] != nil && stats[4] == 10.0 && stats[5] == 50.0)
+
+  let minimum = 2
+  let groups = Sale::query()
+    .group_by(|sale| sale.category)
+    .having(|sale| Stats::count() >= minimum)
+    .select(|sale| (sale.category, Stats::sum(sale.units), Stats::count()))
+  let page = groups.page(db, size: 1).unwrap()
+  assert(page.total == 1 && page.items.len() == 1)
+  assert(page.items[0][0] == "books" && page.items[0][1] == 5 && page.items[0][2] == 2)
+
+  let all_groups = Sale::query().group_by(|sale| sale.category)
+    .select(|sale| (sale.category, Stats::count()))
+  assert(Sale::query().group_by(|sale| sale.category).count(db).unwrap() == 2)
+  assert(all_groups.count(db).unwrap() == 2 && all_groups.exists(db).unwrap())
+  let first_group = all_groups.page(db, size: 1).unwrap()
+  let second_group = all_groups.page(db, number: 2, size: 1).unwrap()
+  assert(first_group.total == 2 && first_group.items[0][0] == "books")
+  assert(second_group.items[0][0] == "games")
+
+  let empty = Sale::query().where_category("missing").select(|sale|
+    (Stats::count(), Stats::sum(sale.units), Stats::avg(sale.price))
+  ).first_or_error(db).unwrap()
+  assert(empty[0] == 0 && empty[1] == nil && empty[2] == nil)
+
+  let divisor = 0
+  let divided: [float?] = Sale::query().select(|sale| sale.units / divisor).all(db).unwrap()
+  assert(divided.len() == 3 && divided[0] == nil)
+
+  // Ungrouped fields and aggregate nesting must never rely on SQLite's arbitrary row choice.
+  let invalid = Sale::query().group_by(|sale| sale.category).select(|sale| sale.price)
+  assert(invalid.try_statement().is_err())
+  assert(groups.seek_page(db).is_err())
+}
+
+@test
+fn aggregate_contract() { exercise_aggregates() }
+
+exercise_aggregates()
+print("orm aggregates: ok")

@@ -1,0 +1,112 @@
+//! Ordered keys, grouped foreign keys, typed index expressions and composite joins.
+use std::database::Database
+use orm::{Model, Query}
+
+@derive(Model)
+@model(
+  table: "advanced_accounts",
+  primary_key: [Account.tenant_id, Account.id],
+  advanced_indexes: #{
+    active_email: #{
+      unique: true,
+      terms: [
+        #{field: Account.tenant_id},
+        #{field: Account.email, transform: .Lower, direction: .Desc},
+      ],
+      predicate: [#{field: Account.active, kind: .IsTrue}],
+    },
+  },
+)
+struct Account {
+  @model(column: "tenant_key")
+  tenant_id: int,
+  id: int,
+  email: str,
+  name: str,
+  active: bool = true,
+}
+
+@derive(Model)
+@model(
+  table: "advanced_memberships",
+  primary_key: [Membership.tenant_id, Membership.id],
+  foreign_keys: #{
+    account: #{
+      fields: [Membership.tenant_id, Membership.account_id],
+      references: [Account.tenant_id, Account.id],
+      on_delete: .Cascade,
+    },
+  },
+)
+struct Membership {
+  tenant_id: int,
+  id: int,
+  account_id: int,
+  role: str,
+}
+
+@derive(Query)
+struct Directory {
+  membership: Membership,
+  @join(
+    from: Directory.membership,
+    keys: [Membership.tenant_id, Membership.account_id],
+    reference_keys: [Account.tenant_id, Account.id],
+  )
+  account: Account,
+}
+
+fn exercise_advanced_schemas() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  Account::create_table(db).unwrap()
+  Membership::create_table(db).unwrap()
+
+  let first = Account::create(db, tenant_id: 1, id: 7, email: "ANA@example.test", name: "Ana").unwrap()
+  Account::create(db, tenant_id: 2, id: 7, email: "ana@example.test", name: "Another tenant").unwrap()
+  Account::create(db, tenant_id: 1, id: 8, email: "ana@example.test", name: "Archived", active: false).unwrap()
+  assert(Account::create(db, tenant_id: 1, id: 9, email: "ana@example.test", name: "Duplicate active").is_err())
+  let ordered = Account::query().order_by_id()
+  let first_page = ordered.seek_page(db, size: 1).unwrap()
+  let second_page = ordered.seek_page(db, size: 1, after: first_page.next_cursor).unwrap()
+  assert(first_page.items[0].tenant_id == 1 && first_page.items[0].id == 7)
+  assert(second_page.items[0].tenant_id == 2 && second_page.items[0].id == 7)
+  let key = AccountKey { tenant_id: 1, id: 7 }
+  assert(first.key().tenant_id == key.tenant_id && first.key().id == key.id)
+  Account::changes(name: "Ana Maria").apply(db, key).unwrap()
+  assert(Account::find_or_error(db, key).unwrap().name == "Ana Maria")
+  assert(Account::find_or_error(db, AccountKey { tenant_id: 2, id: 7 }).unwrap().name == "Another tenant")
+
+  let input = AccountInsert { tenant_id: 1, id: 7, email: "unused@example.test", name: "unused" }
+  let saved = Account::upsert_by_key(db, input, Account::changes(name: "Ana Updated")).unwrap()
+    ?? panic("upsert must return the composite-key row")
+  assert(saved.tenant_id == 1 && saved.id == 7 && saved.email == "ANA@example.test")
+  Membership::create(db, tenant_id: 1, id: 10, account_id: 7, role: "owner").unwrap()
+  Membership::create(db, tenant_id: 2, id: 10, account_id: 7, role: "reader").unwrap()
+  assert(Membership::create(db, tenant_id: 3, id: 10, account_id: 7, role: "wrong tenant").is_err())
+  let directory = Directory::query().order_by_membership_tenant_id()
+  let joined_page = directory.seek_page(db, size: 1).unwrap()
+  let joined_next = directory.seek_page(db, size: 1, after: joined_page.next_cursor).unwrap()
+  assert(joined_page.items[0].membership.tenant_id == 1)
+  assert(joined_next.items[0].membership.tenant_id == 2 && !joined_next.has_next)
+  let joined = Directory::query().order_by_membership_tenant_id().all(db).unwrap()
+  assert(joined.len() == 2)
+  assert(joined[0].membership.tenant_id == 1 && joined[0].account.name == "Ana Updated")
+  assert(joined[1].membership.tenant_id == 2 && joined[1].account.name == "Another tenant")
+
+  let ddl = Account::schema_sql()
+  assert(ddl.contains("PRIMARY KEY (\"tenant_key\", \"id\")"))
+  assert(ddl.contains("LOWER(\"email\") DESC") && ddl.contains("WHERE \"active\" = TRUE"))
+  assert(Membership::schema_sql().contains("FOREIGN KEY (\"tenant_id\", \"account_id\")"))
+
+  saved.delete(db).unwrap()
+  assert(Account::find(db, key).unwrap() == nil)
+  assert(Membership::query().count(db).unwrap() == 1)
+  assert(Membership::find_or_error(db, MembershipKey { tenant_id: 2, id: 10 }).unwrap().role == "reader")
+}
+
+@test
+fn advanced_schemas_preserve_key_identity() { exercise_advanced_schemas() }
+
+exercise_advanced_schemas()
+print("orm advanced schemas: ok")

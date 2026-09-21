@@ -1,0 +1,4 @@
+use orm::Sql
+use dx_fixture::Item
+
+let query = Item::query().select(|item| Sql::min(item.state))

@@ -65,9 +65,18 @@ From `examples/`, run `zolo run <file>.zolo --no-cache`.
 
 | Program | What it demonstrates |
 | --- | --- |
+| [aggregates.zolo](aggregates.zolo) | Computed selections, empty aggregates, grouped totals and group-aware pages. |
+| [advanced_cursors.zolo](advanced_cursors.zolo) | Mixed directions, NULL ordering, hidden projection keys and joined continuation. |
+| [builtin_codecs.zolo](builtin_codecs.zolo) | Validated dates/UTC timestamps, exact decimals and real binary storage. |
+| [advanced_schemas.zolo](advanced_schemas.zolo) | Composite keys, typed foreign-key descriptors and advanced indexes. |
+| [named_patches.zolo](named_patches.zolo) | Named changes, omitted fields, explicit NULL, immutable patches and upserts. |
+| [domain_codecs.zolo](domain_codecs.zolo) | Enum/newtype fields, private codecs, bound domain filters and contextual decode errors. |
+| [composed_queries.zolo](composed_queries.zolo) | Four named sources, chained LEFT/INNER joins, self joins, facade imports and stable pages. |
 | [dx.zolo](dx.zolo) | Defaults, NULL, typed patches and query ergonomics. |
 | [dx_imports.zolo](dx_imports.zolo) | Imported models and generated inputs, private defaults and SQL schema checking. |
 | [expressions.zolo](expressions.zolo) | Captured query expressions, bound values and projections. |
+| [typed_indexes.zolo](typed_indexes.zolo) | Typed composite indexes, mapped columns and named unique upserts. |
+| [pagination.zolo](pagination.zolo) | Row presence, numbered pages, cursor keys, joined ordering and invalid requests. |
 | [required_reads.zolo](required_reads.zolo) | Optional/required reads, existence, pagination and decode errors. |
 | [error_handling.zolo](error_handling.zolo) | Recoverable duplicate registration and transaction rollback. |
 | [schema_writes.zolo](schema_writes.zolo) | Composite indexes, mapped columns, nullable conflicts, empty patches and trigger behavior. |
@@ -77,8 +86,11 @@ From `examples/`, run `zolo run <file>.zolo --no-cache`.
 | [integration.zolo](integration.zolo) | CRUD, query and batch integration coverage. |
 | [hygiene.zolo](hygiene.zolo) | Fields that resemble generated helper names. |
 
-[models.zolo](models.zolo) and [schema_parents.zolo](schema_parents.zolo)
-are imported fixtures, not standalone demonstrations.
+[models.zolo](models.zolo), [schema_parents.zolo](schema_parents.zolo),
+[domain_models.zolo](domain_models.zolo), [aggregate_models.zolo](aggregate_models.zolo),
+[composed_models.zolo](composed_models.zolo)
+and [composed_views.zolo](composed_views.zolo) are imported fixtures, not
+standalone demonstrations.
 [benchmark.zolo](benchmark.zolo) is driven by the benchmark script below.
 
 ## Run native or LLVM
@@ -131,3 +143,35 @@ two imported aliases of the same parent, contextual and explicit action enums,
 a typed join and cascade updates/deletes. Run it with
 `zolo run typed_relations.zolo --no-cache`. Expected output:
 `orm typed relation metadata: ok`.
+
+### Typed indexes, presence and pages
+
+[typed_indexes.zolo](typed_indexes.zolo) declares index members as field
+references and upserts through a composite unique key. Expected output:
+`orm typed indexes: ok`.
+
+[pagination.zolo](pagination.zolo) distinguishes a present NULL from no row,
+pages models and projections, breaks ties in joins using both primary keys,
+and continues int/string keys in either direction. It also includes malformed
+rows and invalid page requests. Expected output:
+`orm presence and pagination: ok`.
+
+### Named patches, composed queries and codecs
+
+[named_patches.zolo](named_patches.zolo) expects `orm named patches: ok`.
+[composed_queries.zolo](composed_queries.zolo) expects `orm composed queries: ok`.
+[domain_codecs.zolo](domain_codecs.zolo) expects `orm domain codecs: ok`.
+
+These examples are registered in the VM/package and native/LLVM suites. They
+use local package sources and need a matching compiler with the metadata and
+nominal-type support described in [compatibility](../docs/errors-and-compatibility.md#compatibility).
+
+### Advanced queries, cursors, codecs and schemas
+
+[aggregates.zolo](aggregates.zolo) expects `orm aggregates: ok`.
+[advanced_cursors.zolo](advanced_cursors.zolo) expects `orm advanced cursors: ok`.
+[builtin_codecs.zolo](builtin_codecs.zolo) expects `orm builtin codecs: ok`.
+[advanced_schemas.zolo](advanced_schemas.zolo) expects `orm advanced schemas: ok`.
+
+These new regression sources are written and cataloged; execution validation of
+the current development batch is pending.

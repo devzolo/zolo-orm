@@ -32,7 +32,7 @@ run_step(sh"{zolo} check src/lib.zolo".cwd(root), "check src/lib.zolo")
 run_step(sh"{zolo} install".cwd(examples), "install examples")
 let runnable = [
     "basic", "upsert", "relationships", "integration", "dx", "dx_imports",
-    "expressions", "hygiene", "required_reads", "error_handling", "schema_writes", "foreign_keys", "relations", "query_plan", "joins", "nullable_projections", "typed_relations",
+    "expressions", "hygiene", "required_reads", "error_handling", "schema_writes", "foreign_keys", "relations", "query_plan", "joins", "nullable_projections", "typed_relations", "typed_indexes", "pagination", "named_patches", "domain_codecs", "composed_queries", "aggregates", "advanced_cursors", "builtin_codecs", "advanced_schemas",
 ]
 for example in runnable {
     run_step(sh"{zolo} run {example}.zolo --no-cache".cwd(examples), "run {example}.zolo")
@@ -45,10 +45,65 @@ run_step(sh"{zolo} test schema_writes.zolo".cwd(examples), "test schema_writes.z
 run_step(sh"{zolo} test foreign_keys.zolo".cwd(examples), "test foreign_keys.zolo")
 run_step(sh"{zolo} test joins.zolo".cwd(examples), "test joins.zolo")
 run_step(sh"{zolo} test typed_relations.zolo".cwd(examples), "test typed_relations.zolo")
+run_step(sh"{zolo} test typed_indexes.zolo".cwd(examples), "test typed_indexes.zolo")
+run_step(sh"{zolo} test pagination.zolo".cwd(examples), "test pagination.zolo")
+run_step(sh"{zolo} test named_patches.zolo".cwd(examples), "test named_patches.zolo")
+run_step(sh"{zolo} test domain_codecs.zolo".cwd(examples), "test domain_codecs.zolo")
+run_step(sh"{zolo} test composed_queries.zolo".cwd(examples), "test composed_queries.zolo")
+run_step(sh"{zolo} test aggregates.zolo".cwd(examples), "test aggregates.zolo")
+run_step(sh"{zolo} test advanced_cursors.zolo".cwd(examples), "test advanced_cursors.zolo")
+run_step(sh"{zolo} test builtin_codecs.zolo".cwd(examples), "test builtin_codecs.zolo")
+run_step(sh"{zolo} test advanced_schemas.zolo".cwd(examples), "test advanced_schemas.zolo")
 run_step(sh"{zolo} test nullable_projections.zolo".cwd(examples), "test nullable_projections.zolo")
 
 run_step(sh"{zolo} install".cwd(tests), "install tests")
 let cases = [
+    CompileFail { file: "composite_key_subset_foreign.zolo", patterns: ["complete primary, column UNIQUE or unique_indexes"] },
+    CompileFail { file: "composite_key_wrong_owner.zolo", patterns: ["primary key field must belong"] },
+    CompileFail { file: "composite_key_patch.zolo", patterns: ["unknown parameter `tenant_id`"] },
+    CompileFail { file: "composite_foreign_arity.zolo", patterns: ["equally sized nonempty fields/references"] },
+    CompileFail { file: "advanced_index_wrong_owner.zolo", patterns: ["index field must belong"] },
+    CompileFail { file: "advanced_index_wrong_transform.zolo", patterns: ["text index transform requires"] },
+    CompileFail { file: "advanced_index_unknown_option.zolo", patterns: ["unknown field 'condition'"] },
+    CompileFail { file: "advanced_index_missing_field.zolo", patterns: ["missing required field 'field'"] },
+    CompileFail { file: "advanced_index_partial_upsert.zolo", patterns: ["TE104"] },
+    CompileFail { file: "seek_wrong_cursor.zolo", patterns: ["TE111"] },
+    CompileFail { file: "aggregate_wrong_type.zolo", patterns: ["SQL aggregate is incompatible with this scalar type"] },
+    CompileFail { file: "aggregate_nested.zolo", patterns: ["nested SQL aggregates are not supported"] },
+    CompileFail { file: "aggregate_codec.zolo", patterns: ["SQL aggregates are not defined for codec fields"] },
+    CompileFail { file: "group_codec.zolo", patterns: ["GROUP BY requires primitive non-binary fields without codecs"] },
+    CompileFail { file: "codec_collection_domain.zolo", patterns: ["wrap collections in a newtype"] },
+    CompileFail { file: "codec_captured_range.zolo", patterns: ["codec"] },
+    CompileFail { file: "codec_captured_wrong_type.zolo", patterns: ["incompatible"] },
+    CompileFail { file: "query_lambda_arity.zolo", patterns: ["2 named row parameters"] },
+    CompileFail { file: "query_required_left_access.zolo", patterns: ["requires optional field"] },
+    CompileFail { file: "named_patch_wrong_type.zolo", patterns: ["TE111"] },
+    CompileFail { file: "named_patch_required_null.zolo", patterns: ["TE111"] },
+    CompileFail { file: "codec_wrong_filter_type.zolo", patterns: ["TE111"] },
+    CompileFail { file: "codec_wrong_patch_type.zolo", patterns: ["TE111"] },
+    CompileFail { file: "codec_order.zolo", patterns: ["TE104"] },
+    CompileFail { file: "codec_storage_without_codec.zolo", patterns: ["storage requires a codec"] },
+    CompileFail { file: "codec_primary_key.zolo", patterns: ["codec fields cannot be primary"] },
+    CompileFail { file: "codec_bad_encode.zolo", patterns: ["expected.*str.*(?:found|got).*int", "type mismatch"] },
+    CompileFail { file: "codec_bad_decode.zolo", patterns: ["expected.*str.*(?:found|got).*int", "type mismatch"] },
+    CompileFail { file: "query_optional_root.zolo", patterns: ["first query source cannot be optional"] },
+    CompileFail { file: "query_wrong_source.zolo", patterns: ["join source must belong to this query view"] },
+    CompileFail { file: "query_forward_source.zolo", patterns: ["join source must precede its target"] },
+    CompileFail { file: "query_wrong_key.zolo", patterns: ["join key belongs to a different source model"] },
+    CompileFail { file: "query_wrong_target.zolo", patterns: ["join references belongs to a different target model"] },
+    CompileFail { file: "query_wrong_key_type.zolo", patterns: ["joined fields require matching scalar types"] },
+    CompileFail { file: "query_codec_key.zolo", patterns: ["join keys cannot use domain codecs"] },
+    CompileFail { file: "query_missing_join.zolo", patterns: ["joined sources require from and equally sized nonempty keys/reference_keys"] },
+    CompileFail { file: "index_string_field.zolo", patterns: ["TE217.*FieldRef"] },
+    CompileFail { file: "index_wrong_owner.zolo", patterns: ["index field must belong"] },
+    CompileFail { file: "index_value_field.zolo", patterns: ["TE217.*FieldRef"] },
+    CompileFail { file: "index_scalar_list.zolo", patterns: ["TE217"] },
+    CompileFail { file: "index_type_instead_field.zolo", patterns: ["TE217.*FieldRef"] },
+    CompileFail { file: "index_same_name_owner.zolo", patterns: ["index field must belong"] },
+    CompileFail { file: "cursor_wrong_key.zolo", patterns: ["TE111"] },
+    CompileFail { file: "cursor_float_key.zolo", patterns: ["TE104"] },
+    CompileFail { file: "page_wrong_number.zolo", patterns: ["TE111"] },
+
     CompileFail { file: "foreign_no_action_without_key.zolo", patterns: ["actions require foreign_key"] },
     CompileFail { file: "relation_string_target.zolo", patterns: ["TE217.*TypeRef"] },
     CompileFail { file: "relation_string_field.zolo", patterns: ["TE217.*FieldRef"] },
@@ -69,7 +124,7 @@ let cases = [
 
     CompileFail { file: "wrong_filter_type.zolo", patterns: ["TE111"] },
     CompileFail { file: "unknown_field.zolo", patterns: ["TE104"] },
-    CompileFail { file: "missing_key.zolo", patterns: ["declare exactly one"] },
+    CompileFail { file: "missing_key.zolo", patterns: ["declare primary_key:"] },
     CompileFail { file: "optional_key.zolo", patterns: ["primary key cannot be optional"] },
     CompileFail { file: "unsupported_field.zolo", patterns: ["unsupported field type"] },
     CompileFail { file: "duplicate_column.zolo", patterns: ["duplicate column"] },
@@ -85,7 +140,7 @@ let cases = [
     CompileFail { file: "wrong_sql_parameter.zolo", patterns: ["SQL value expects.*int.*found.*str"] },
     CompileFail { file: "invalid_generated_key.zolo", patterns: ["generated requires an integer primary key"] },
     CompileFail { file: "query_method_collision.zolo", patterns: ["generated query method collision: where_id_not"] },
-    CompileFail { file: "unknown_index_field.zolo", patterns: ["unknown index field"] },
+    CompileFail { file: "unknown_index_field.zolo", patterns: ["TE217.*missing"] },
     CompileFail { file: "empty_index.zolo", patterns: ["index requires at least one field"] },
     CompileFail { file: "duplicate_index_field.zolo", patterns: ["duplicate index field"] },
     CompileFail { file: "duplicate_index_name.zolo", patterns: ["duplicate index name"] },

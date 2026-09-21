@@ -1,0 +1,90 @@
+//! Mixed ordering, nullable values, hidden keys and joined cursor continuations.
+use std::database::Database
+use orm::Model
+use composed_views::{Directory, seed_directory}
+
+@derive(Model)
+@model(table: "cursor_events")
+struct CursorEvent {
+  @model(primary_key: true)
+  id: int,
+  rank: int?,
+  title: str,
+  active: bool = true,
+  // Hidden cursor projection aliases must not overwrite real columns.
+  __orm_cursor_0: str = "authored",
+}
+
+fn exercise_advanced_cursors() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  CursorEvent::create_table(db).unwrap()
+  CursorEvent::insert_many(db, [
+    CursorEvent.new(1, nil, "C"),
+    CursorEvent.new(2, nil, "A"),
+    CursorEvent.new(3, 10, "A"),
+    CursorEvent.new(4, 10, "B"),
+    CursorEvent.new(5, 20, "A"),
+  ]).unwrap()
+
+  let ordered = CursorEvent::query().order_by_rank().order_by_title(descending: true)
+  let first = ordered.seek_page(db, size: 2).unwrap()
+  assert(first.items.len() == 2 && first.items[0].id == 1 && first.items[1].id == 2)
+  assert(first.items[0].__orm_cursor_0 == "authored" && first.has_next)
+  let second = ordered.seek_page(db, size: 2, after: first.next_cursor).unwrap()
+  assert(second.items[0].id == 4 && second.items[1].id == 3)
+  let third = ordered.seek_page(db, size: 2, after: second.next_cursor).unwrap()
+  assert(third.items.len() == 1 && third.items[0].id == 5 && !third.has_next)
+  assert(third.next_cursor == nil)
+
+  let descending = CursorEvent::query().order_by_rank(descending: true).order_by_title(descending: true)
+  let down = descending.seek_page(db, size: 3).unwrap()
+  assert(down.items[0].id == 5 && down.items[1].id == 4 && down.items[2].id == 3)
+  let nulls = descending.seek_page(db, size: 3, after: down.next_cursor).unwrap()
+  assert(nulls.items[0].id == 1 && nulls.items[1].id == 2 && !nulls.has_next)
+
+  // The decoder sees only the selected type; hidden rank/id columns build the cursor.
+  let projected = ordered.select(|event| event.title)
+  let titles = projected.seek_page(db, size: 2).unwrap()
+  let more_titles = projected.seek_page(db, size: 2, after: titles.next_cursor).unwrap()
+  assert(titles.items[0] == "C" && more_titles.items[0] == "B" && more_titles.items[1] == "A")
+  let nullable = ordered.select(|event| event.rank).seek_page(db, size: 2).unwrap()
+  assert(nullable.items.len() == 2 && nullable.items[0] == nil && nullable.items[1] == nil)
+
+  // The cursor rejects changed ordering and changed bound values.
+  match descending.seek_page(db, size: 2, after: first.next_cursor) {
+    .Err(.InvalidPagination(_)) => {},
+    _ => panic("expected incompatible ordering"),
+  }
+  let active = CursorEvent::query().where_active(true).seek_page(db, size: 1).unwrap()
+  match CursorEvent::query().where_active(false).seek_page(db, size: 1, after: active.next_cursor) {
+    .Err(.InvalidPagination(_)) => {},
+    _ => panic("expected incompatible query bindings"),
+  }
+  match ordered.limit(1).seek_page(db) {
+    .Err(.InvalidPagination(_)) => {},
+    _ => panic("seek_page must reject limit"),
+  }
+  match ordered.seek_page(db, size: 0) {
+    .Err(.InvalidPagination(_)) => {},
+    _ => panic("seek_page must reject an empty page size"),
+  }
+
+  // Reusing the first immutable token returns the same continuation.
+  assert(ordered.seek_page(db, size: 1, after: first.next_cursor).unwrap().items[0].id == 4)
+
+  seed_directory(db).unwrap()
+  let directory = Directory::query().order_by_team_name().order_by_person_name(descending: true)
+  let joined = directory.seek_page(db, size: 2).unwrap()
+  let rest = directory.seek_page(db, size: 2, after: joined.next_cursor).unwrap()
+  assert(joined.items.len() == 2 && rest.items.len() == 2 && !rest.has_next)
+  let names = directory.select(|person, team, organization, manager| (person.name, team?.name))
+  let selected = names.seek_page(db, size: 2).unwrap()
+  assert(names.seek_page(db, size: 2, after: selected.next_cursor).unwrap().items.len() == 2)
+}
+
+@test
+fn advanced_cursor_contract() { exercise_advanced_cursors() }
+
+exercise_advanced_cursors()
+print("orm advanced cursors: ok")

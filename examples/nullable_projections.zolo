@@ -49,12 +49,14 @@ fn exercise_nullable_projections() {
   assert(empty.len() == 0)
   let page: [str?] = query.select(|reading| reading.label).limit(3).offset(2).all(db).unwrap()
   assert(page.len() == 3 && page[0] == nil && page[1] == "last value" && page[2] == nil)
-  // first returns T?: a NULL scalar and no row both produce nil. Use a tuple
-  // containing a required key when callers need to distinguish those outcomes.
+  // first keeps its optional-value contract; first_row separates row presence.
   assert(query.select(|reading| reading.label).first(db).unwrap() == nil)
-  let present_row = query.select(|reading| (reading.id, reading.label)).first(db).unwrap()
+  let present_row = query.select(|reading| reading.label).first_row(db).unwrap()
     ?? panic("expected the row whose label is NULL")
-  assert(present_row[0] == 1 && present_row[1] == nil)
+  assert(present_row.value == nil)
+  assert(query.select(|reading| reading.label).first_or_error(db).unwrap() == nil)
+  let absent = query.where_id(-1).select(|reading| reading.label).first_row(db).unwrap()
+  assert(absent == nil)
 }
 
 @test

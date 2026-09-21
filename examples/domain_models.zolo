@@ -1,0 +1,72 @@
+//! Shared domain types: callers use enum/newtype values, storage remains scalar.
+use orm::{Model, Query}
+
+pub enum State { Active, Disabled }
+pub newtype Email(str)
+
+struct StateCodec {}
+impl StateCodec {
+  pub fn encode(value: State) -> str {
+    return match value { .Active => "active", .Disabled => "disabled" }
+  }
+  pub fn decode(value: str) -> Result<State, str> {
+    return match value {
+      "active" => Result::Ok(State::Active),
+      "disabled" => Result::Ok(State::Disabled),
+      _ => Result::Err("unrecognized stored state"),
+    }
+  }
+}
+
+struct EmailCodec {}
+impl EmailCodec {
+  pub fn encode(value: Email) -> str { return value.unwrap() }
+  pub fn decode(value: str) -> Result<Email, str> {
+    if !value.contains("@") { return Result::Err("invalid email") }
+    return Result::Ok(Email.new(value))
+  }
+}
+
+pub newtype Credits(int)
+struct CreditsCodec {}
+impl CreditsCodec {
+  pub fn encode(value: Credits) -> int { return value.unwrap() }
+  pub fn decode(value: int) -> Result<Credits, str> {
+    if value < 0 { return Result::Err("negative credits") }
+    return Result::Ok(Credits.new(value))
+  }
+}
+
+@derive(Model)
+@model(table: "domain_accounts", unique_indexes: #{by_email: [Account.email]})
+pub struct Account {
+  @model(primary_key: true)
+  pub id: int,
+  @model(codec: EmailCodec)
+  pub email: Email,
+  @model(codec: StateCodec, storage: .Text)
+  pub state: State = .Active,
+  @model(codec: StateCodec)
+  pub previous_state: State?,
+  @model(codec: CreditsCodec, storage: .Integer)
+  pub credits: Credits,
+}
+
+// A codec field called row must not collide with the model's bind_row helper.
+@derive(Model)
+@model(table: "domain_links")
+pub struct AccountLink {
+  @model(primary_key: true)
+  pub id: int,
+  @model(belongs_to: Account)
+  pub account_id: int?,
+  @model(codec: StateCodec)
+  pub row: State = .Active,
+}
+
+@derive(Query)
+pub struct AccountDirectory {
+  pub link: AccountLink,
+  @join(from: AccountDirectory.link, key: AccountLink.account_id, references: Account.id)
+  pub account: Account?,
+}

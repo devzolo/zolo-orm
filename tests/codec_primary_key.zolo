@@ -1,0 +1,4 @@
+use orm::Model
+use dx_fixture::{State, StateCodec}
+@derive(Model)
+struct Item { @model(primary_key: true, codec: StateCodec) id: State, }

@@ -1,0 +1,42 @@
+//! Composite indexes refer to logical fields and preserve mapped SQL columns.
+use std::database::Database
+use orm::Model
+
+@derive(Model)
+@model(
+  table: "typed_index_accounts",
+  indexes: #{by_name: [Account.name, Account.tenant_id]},
+  unique_indexes: #{tenant_email: [Account.tenant_id, Account.email]},
+)
+struct Account {
+  @model(primary_key: true, generated: true)
+  id: int,
+  @model(column: "tenant_key")
+  tenant_id: int,
+  @model(column: "email_address")
+  email: str,
+  name: str,
+}
+
+fn exercise_typed_indexes() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  Account::create_table(db).unwrap()
+  let ddl = Account::schema_sql()
+  assert(ddl.contains("UNIQUE INDEX"))
+  assert(ddl.contains("(\"tenant_key\", \"email_address\")"))
+  let first = Account::create(db, tenant_id: 1, email: "ana@example.com", name: "Ana").unwrap()
+  let input = AccountInsert { tenant_id: 1, email: "ana@example.com", name: "ignored on update" }
+  let updated = Account::upsert_by_index_tenant_email(db, input, Account::changes().set_name("Ana Maria")).unwrap()
+    ?? panic("upsert must update")
+  assert(updated.id == first.id && updated.name == "Ana Maria")
+  Account::create(db, tenant_id: 2, email: "ana@example.com", name: "Other tenant").unwrap()
+  assert(Account::query().count(db).unwrap() == 2)
+  assert(Account::query().where_tenant_id(1).first_or_error(db).unwrap().name == "Ana Maria")
+}
+
+@test
+fn typed_composite_indexes() { exercise_typed_indexes() }
+
+exercise_typed_indexes()
+print("orm typed indexes: ok")

@@ -1,0 +1,70 @@
+//! Named patches preserve omission, explicit NULL and existing setter semantics.
+use std::database::Database
+use orm::Model
+
+fn construction_default() -> str { panic("a patch must not evaluate construction defaults") }
+
+@derive(Model)
+@model(table: "patch_accounts")
+struct Account {
+  @model(primary_key: true)
+  id: int,
+  @model(unique: true)
+  email: str,
+  name: str = construction_default(),
+  note: str? = "construction note",
+  active: bool = true,
+  visits: int = 10,
+}
+
+@derive(Model)
+@model(table: "patch_hygiene")
+struct Names {
+  @model(primary_key: true)
+  id: int,
+  panic: str,
+  type: str,
+  math: int,
+  __orm_patch: str,
+  AccountChanges: str?,
+}
+
+fn exercise_named_patches() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  Account::create_table(db).unwrap()
+  Account::create(db, id: 1, email: "ana@example.test", name: "Ana", note: "keep").unwrap()
+  let empty = Account::changes()
+  assert(empty.plan.assignments.len() == 0)
+  assert(empty.apply(db, 1).unwrap() == 0)
+
+  let rename = Account::changes(name: "Ana Maria")
+  let clear = rename.set_note(nil)
+  assert(rename.plan.assignments.len() == 1 && clear.plan.assignments.len() == 2)
+  rename.apply(db, 1).unwrap()
+  assert(Account::find_or_error(db, 1).unwrap().note == "keep")
+  Account::changes(note: nil, active: false, visits: 0).apply(db, 1).unwrap()
+  let saved = Account::find_or_error(db, 1).unwrap()
+  assert(saved.name == "Ana Maria" && saved.note == nil && !saved.active && saved.visits == 0)
+  Account::changes(name: "", note: "set").set_name("last assignment").apply(db, 1).unwrap()
+  assert(Account::find_or_error(db, 1).unwrap().name == "last assignment")
+
+  let input = AccountInsert { id: 2, email: "ana@example.test", name: "insert only" }
+  let upserted = Account::upsert_by_email(db, input, Account::changes(note: nil)).unwrap()
+    ?? panic("upsert should update")
+  assert(upserted.id == 1 && upserted.name == "last assignment" && upserted.note == nil)
+  assert(Account::upsert_by_email(db, input, Account::changes()).unwrap() == nil)
+
+  Names::create_table(db).unwrap()
+  Names::create(db, id: 1, panic: "safe", type: "original", math: 10, __orm_patch: "kept", AccountChanges: "old").unwrap()
+  Names::changes(panic: "updated", type: "renamed", math: 0, AccountChanges: nil).apply(db, 1).unwrap()
+  let names = Names::find_or_error(db, 1).unwrap()
+  assert(names.panic == "updated" && names.__orm_patch == "kept" && names.AccountChanges == nil)
+  assert(names.type == "renamed" && names.math == 0)
+}
+
+@test
+fn named_patches_preserve_presence() { exercise_named_patches() }
+
+exercise_named_patches()
+print("orm named patches: ok")

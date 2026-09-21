@@ -1,5 +1,8 @@
 //! Typed models generated at compile time, backed by std::database and zolo-sql.
 use std::database::{Database, DbError, SQL}
+pub use crate::codecs::{Date, DateCodec, Timestamp, TimestampCodec, ExactDecimal, DecimalCodec, Blob, BlobCodec}
+pub use crate::cursor::QueryCursor
+use crate::cursor::{cursor_layout, contains_aggregate}
 
 pub enum OrmError {
   Database(DbError),
@@ -8,6 +11,8 @@ pub enum OrmError {
   Decode(str),
   FieldDecode(DecodeError),
   UnsafeMutation(str),
+  /// Invalid page bounds or query clauses incompatible with pagination.
+  InvalidPagination(str),
   Unsupported(str),
 }
 
@@ -39,6 +44,12 @@ pub struct Assignment {
   pub params: [Any],
 }
 
+/// A named patch parameter that was omitted. Explicit nil remains a real value.
+pub struct Unchanged {}
+
+/// Shared failure path keeps named patch fields from shadowing panic.
+pub fn invalid_patch_value(message: str) { panic(message) }
+
 /// Shared patch storage; generated setters supply checked, quoted identifiers.
 pub struct UpdatePlan {
   pub assignments: [Assignment] = [],
@@ -63,6 +74,10 @@ impl UpdatePlan {
     return "DO UPDATE SET " + clauses.join(", ")
   }
   fn apply(self, db: Database, table_name: str, key_column: str, key: Any) -> Result<int, OrmError> {
+    return self.apply_keys(db, table_name, [key_column], [key])
+  }
+  fn apply_keys(self, db: Database, table_name: str, key_columns: [str], keys: [Any]) -> Result<int, OrmError> {
+    if key_columns.len() == 0 || key_columns.len() != keys.len() { return Result::Err(OrmError::UnsafeMutation("invalid primary-key arity")) }
     if self.assignments.len() == 0 { return Result::Ok(0) }
     let params: [Any] = []
     let clauses: [str] = []
@@ -70,9 +85,10 @@ impl UpdatePlan {
       clauses.push(assignment.column + " = " + assignment.slot)
       for value in assignment.params { params.push(value) }
     }
-    params.push(key)
+    for key in keys { params.push(key) }
+    let predicate = key_columns.map(|column| column + " = ?").join(" AND ")
     return Statement.new(
-      "UPDATE " + table_name + " SET " + clauses.join(", ") + " WHERE " + key_column + " = ?",
+      "UPDATE " + table_name + " SET " + clauses.join(", ") + " WHERE " + predicate,
       params,
     ).execute(db)
   }
@@ -136,6 +152,33 @@ fn collect_filters(filters: FilterNode?) -> FilterParts {
   return FilterParts.new(predicate, params)
 }
 
+/// SQL aggregate markers: meaningful only inside captured query expressions.
+@sql_aggregates
+pub struct Sql {}
+impl Sql {
+  pub fn count() -> int { panic("orm: SQL aggregates require a captured query expression") }
+  pub fn count_value<T>(value: T) -> int {
+    let _ = value
+    panic("orm: SQL aggregates require a captured query expression")
+  }
+  pub fn sum<T>(value: T) -> T? {
+    let _ = value
+    panic("orm: SQL aggregates require a captured query expression")
+  }
+  pub fn avg<T>(value: T) -> float? {
+    let _ = value
+    panic("orm: SQL aggregates require a captured query expression")
+  }
+  pub fn min<T>(value: T) -> T? {
+    let _ = value
+    panic("orm: SQL aggregates require a captured query expression")
+  }
+  pub fn max<T>(value: T) -> T? {
+    let _ = value
+    panic("orm: SQL aggregates require a captured query expression")
+  }
+}
+
 /// A joined result retains both nominal models. LEFT joins make right optional.
 pub struct Joined<L, R> {
   pub left: L,
@@ -153,6 +196,13 @@ pub struct QueryPlan {
   pub alias: str? = nil,
   pub joins: [Any] = [],
   pub join_filters: FilterNode? = nil,
+  /// Unique source keys used to make numbered pages deterministic.
+  pub page_keys: [Any] = [],
+  pub source: str = "",
+  pub projection_values: [Any] = [],
+  pub grouping: [Any] = [],
+  pub having_filters: FilterNode? = nil,
+  pub projection_selected: bool = false,
 }
 
 impl QueryPlan {
@@ -167,6 +217,12 @@ impl QueryPlan {
       self.alias,
       self.joins,
       self.join_filters,
+      self.page_keys,
+      self.source,
+      self.projection_values,
+      self.grouping,
+      self.having_filters,
+      self.projection_selected,
     )
   }
   fn equal(self, column: str, value: Any) -> QueryPlan {
@@ -183,41 +239,111 @@ impl QueryPlan {
   fn order(self, column: Any, descending: bool) -> QueryPlan {
     let ordering = self.ordering.map(|item| item)
     ordering.push(#{column, descending})
-    return QueryPlan.new(self.table, self.columns, self.filters, ordering, self.take, self.skip, self.alias, self.joins, self.join_filters)
+    return QueryPlan.new(self.table, self.columns, self.filters, ordering, self.take, self.skip, self.alias, self.joins, self.join_filters, self.page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected)
   }
   fn limit(self, count: int) -> QueryPlan {
     if count < 0 { panic("orm: limit must be non-negative") }
-    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, count, self.skip, self.alias, self.joins, self.join_filters)
+    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, count, self.skip, self.alias, self.joins, self.join_filters, self.page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected)
   }
   fn offset(self, count: int) -> QueryPlan {
     if count < 0 { panic("orm: offset must be non-negative") }
-    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, count, self.alias, self.joins, self.join_filters)
+    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, count, self.alias, self.joins, self.join_filters, self.page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected)
   }
-  fn project(self, columns: [Any]) -> QueryPlan {
-    return QueryPlan.new(self.table, columns, self.filters, self.ordering, self.take, self.skip, self.alias, self.joins, self.join_filters)
+  fn project(self, columns: [Any]) -> QueryPlan { return self.project_expr(columns, []) }
+  fn project_expr(self, columns: [Any], values: [Any]) -> QueryPlan {
+    return QueryPlan.new(self.table, columns, self.filters, self.ordering, self.take, self.skip,
+      self.alias, self.joins, self.join_filters, self.page_keys, self.source,
+      values, self.grouping, self.having_filters, true)
   }
-  fn join(self, table_name: str, kind: str, column: str, referenced: str, columns: [Any]) -> QueryPlan {
+  fn group(self, columns: [Any]) -> QueryPlan {
+    if columns.len() == 0 { panic("orm: GROUP BY requires at least one field") }
+    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, self.skip,
+      self.alias, self.joins, self.join_filters, self.page_keys, self.source,
+      self.projection_values, columns, self.having_filters, self.projection_selected)
+  }
+  fn having(self, predicate: Any, values: [Any]) -> QueryPlan {
+    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, self.skip,
+      self.alias, self.joins, self.join_filters, self.page_keys, self.source,
+      self.projection_values, self.grouping, FilterNode.new(self.having_filters, predicate, values), self.projection_selected)
+  }
+  fn cursor_columns(self, columns: [Any], ordering: [Any]) -> QueryPlan {
+    return QueryPlan.new(self.table, columns, self.filters, ordering, self.take, self.skip,
+      self.alias, self.joins, self.join_filters, self.page_keys, self.source,
+      self.projection_values, self.grouping, self.having_filters, self.projection_selected)
+  }
+  fn aggregated(self) -> bool {
+    return self.grouping.len() > 0 || self.having_filters != nil
+      || self.columns.filter(|column| contains_aggregate(column)).len() > 0
+  }
+  fn join(self, table_name: str, kind: str, column: str, referenced: str, columns: [Any], page_keys: [Any] = []) -> QueryPlan {
     if self.joins.len() > 0 { panic("orm: this query already has a relation join") }
+    if self.projection_selected { panic("orm: add relation joins before selecting a projection") }
     let join_predicate = #{op: "eq", column: #{table: "orm_l", column}, other: #{table: "orm_r", column: referenced}}
     let joins: [Any] = [#{kind, table: table_name, alias: "orm_r", on: join_predicate}]
-    return QueryPlan.new(self.table, columns, self.filters, self.ordering, self.take, self.skip, "orm_l", joins)
+    return QueryPlan.new(self.table, columns, self.filters, self.ordering, self.take, self.skip, "orm_l", joins, nil, page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected)
   }
   fn on(self, predicate: Any, values: [Any]) -> QueryPlan {
-    if self.joins.len() != 1 { panic("orm: ON requires one relation join") }
+    if self.joins.len() == 0 { panic("orm: ON requires a relation join") }
     return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, self.skip,
-      self.alias, self.joins, FilterNode.new(self.join_filters, predicate, values))
+      self.alias, self.joins, FilterNode.new(self.join_filters, predicate, values), self.page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected)
   }
+  /// Prepare a numbered page without changing this reusable query.
+  fn for_page(self, number: int, size: int) -> Result<QueryPlan, OrmError> {
+    if number < 1 || size < 1 {
+      return Result::Err(OrmError::InvalidPagination("page number and size must be positive"))
+    }
+    if self.take >= 0 || self.skip != 0 {
+      return Result::Err(OrmError::InvalidPagination("page cannot be combined with limit or offset"))
+    }
+    if self.page_keys.len() == 0 && !self.aggregated() {
+      return Result::Err(OrmError::InvalidPagination("page requires model primary-key metadata"))
+    }
+    if number - 1 > 9223372036854775807 ~/ size {
+      return Result::Err(OrmError::InvalidPagination("page offset exceeds the integer range"))
+    }
+    var ordered = self
+    let keys = if self.grouping.len() > 0 { self.grouping }
+      else if self.aggregated() { [] } else { self.page_keys }
+    for column in keys { ordered = ordered.order(column, false) }
+    return Result::Ok(ordered.limit(size).offset((number - 1) * size))
+  }
+
+  /// Keyset pagination uses one exclusive bound and a single lookahead row.
+  fn for_cursor(self, column: str, size: int, after: Any, descending: bool) -> Result<QueryPlan, OrmError> {
+    if self.aggregated() { return Result::Err(OrmError::InvalidPagination("cursor_page does not support grouped or aggregate queries")) }
+    if size < 1 || size == 9223372036854775807 {
+      return Result::Err(OrmError::InvalidPagination("cursor size must be positive and leave room for lookahead"))
+    }
+    if self.take >= 0 || self.skip != 0 || self.ordering.len() > 0 || self.joins.len() > 0 {
+      return Result::Err(OrmError::InvalidPagination("cursor_page owns ordering and cannot be combined with limit, offset or joins"))
+    }
+    var query = self
+    if after != nil {
+      let op = if descending { "lt" } else { "gt" }
+      query = query.filter(#{op, column}, [after])
+    }
+    return Result::Ok(query.order(column, descending).limit(size + 1))
+  }
+
+  fn read_source(self) -> str { return if self.source == "" { self.table } else { self.source } }
+
   fn try_statement(self, kind: str) -> Result<Statement, OrmError> {
     let where_parts = collect_filters(self.filters)
     let on_parts = collect_filters(self.join_filters)
+    let having_parts = collect_filters(self.having_filters)
     let bindings: [Any] = []
+    for value in self.projection_values { bindings.push(value) }
     for value in on_parts.params { bindings.push(value) }
     for value in where_parts.params { bindings.push(value) }
+    for value in having_parts.params { bindings.push(value) }
     let predicate = where_parts.predicate
     let joins: [Any] = []
+    var join_index = 0
     for join in self.joins {
-      let join_predicate = if on_parts.predicate == nil { join.on } else { #{op: "and", terms: [join.on, on_parts.predicate]} }
+      let extend = join_index == self.joins.len() - 1 && on_parts.predicate != nil
+      let join_predicate = if extend { #{op: "and", terms: [join.on, on_parts.predicate]} } else { join.on }
       joins.push(#{kind: join.kind, table: join.table, alias: join.alias, on: join_predicate})
+      join_index += 1
     }
     var take: int? = nil
     var skip: int? = nil
@@ -228,13 +354,17 @@ impl QueryPlan {
       if self.skip > 0 { skip = self.skip }
       ordering = self.ordering
     }
+    let columns = if (kind == "count" || kind == "exists")
+      && !self.projection_selected && self.grouping.len() > 0 { self.grouping } else { self.columns }
     let spec = #{
       kind,
       table: self.table,
       alias: self.alias,
       joins,
-      columns: self.columns,
+      columns,
       predicate,
+      group_by: self.grouping,
+      having: having_parts.predicate,
       order: ordering,
       limit: take,
       offset: skip,
@@ -262,6 +392,7 @@ impl QueryPlan {
 
   /// Unfiltered deletion and pagination on mutations require an explicit decision.
   fn delete(self, db: Database) -> Result<int, OrmError> {
+    if self.aggregated() { return Result::Err(OrmError::UnsafeMutation("grouped queries do not support deletion")) }
     if self.joins.len() > 0 { return Result::Err(OrmError::UnsafeMutation("joined queries do not support deletion")) }
     if self.filters == nil {
       return Result::Err(
@@ -274,6 +405,40 @@ impl QueryPlan {
     let statement = self.try_statement("delete")?
     return statement.execute(db)
   }
+}
+
+/// A present row, whose selected value may itself be SQL NULL.
+pub struct Row<T> {
+  pub value: T,
+}
+
+/// One numbered page. Totals cover the filtered query before pagination.
+pub struct Page<T> {
+  pub items: [T],
+  pub number: int,
+  pub size: int,
+  pub total: int,
+  pub total_pages: int,
+  pub next_page: int?,
+  pub previous_page: int?,
+}
+
+/// One keyset page. The cursor is the last emitted key only when more rows exist.
+pub struct CursorPage<T, K> {
+  pub items: [T],
+  pub next_cursor: K?,
+  pub has_next: bool,
+}
+
+/// Shared page metadata constructor used by generated queries.
+pub fn page_result<T>(items: [T], number: int, size: int, total: int) -> Page<T> {
+  var pages = total ~/ size
+  if total % size != 0 { pages += 1 }
+  var next_page: int? = nil
+  if number < pages { next_page = number + 1 }
+  var previous_page: int? = nil
+  if number > 1 { previous_page = number - 1 }
+  return Page.new(items, number, size, total, pages, next_page, previous_page)
 }
 
 /// A SQL projection with a checked decoder for precisely the selected columns.
@@ -307,12 +472,73 @@ impl Projection<T> {
     if rows.len() == 0 { return Result::Ok(nil) }
     return Result::Ok(rows[0])
   }
+  /// Unlike first, this distinguishes no row from a present nullable scalar NULL.
+  fn first_row(self, db: Database) -> Result<Row<T>?, OrmError> {
+    if self.plan.take == 0 { return Result::Ok(nil) }
+    let rows = self.limit(1).all(db)?
+    if rows.len() == 0 { return Result::Ok(nil) }
+    return Result::Ok(Row.new(rows[0]))
+  }
+  fn first_or_error(self, db: Database) -> Result<T, OrmError> {
+    let row = self.first_row(db)?
+    if row == nil { return Result::Err(OrmError::NotFound(self.plan.read_source())) }
+    return Result::Ok(row.value)
+  }
+  fn page(self, db: Database, number: int = 1, size: int = 20) -> Result<Page<T>, OrmError> {
+    let plan = self.plan.for_page(number, size)?
+    let total = self.plan.count(db)?
+    let items = Projection.new(plan, self.decode).all(db)?
+    return Result::Ok(page_result(items, number, size, total))
+  }
+  fn count(self, db: Database) -> Result<int, OrmError> { return self.plan.count(db) }
+  fn exists(self, db: Database) -> Result<bool, OrmError> { return self.plan.exists(db) }
+  /// Continue this projection using typed ordering and all source key tiebreakers.
+  fn seek_page(self, db: Database, size: int = 20, after: QueryCursor? = nil) -> Result<CursorPage<T, QueryCursor>, OrmError> {
+    if size < 1 || size == 9223372036854775807 {
+      return Result::Err(OrmError::InvalidPagination("cursor size must be positive and leave room for lookahead"))
+    }
+    if self.plan.take >= 0 || self.plan.skip != 0 {
+      return Result::Err(OrmError::InvalidPagination("seek_page cannot be combined with limit or offset"))
+    }
+    if self.plan.aggregated() {
+      return Result::Err(OrmError::InvalidPagination("seek_page does not support grouped or aggregate queries"))
+    }
+    let layout = cursor_layout(self.plan.ordering, self.plan.page_keys, self.plan.columns, self.plan.alias ?? self.plan.table)
+      .map_err(|error| OrmError::InvalidPagination(error))?
+    var plan = self.plan.cursor_columns(self.plan.columns, layout.ordering)
+    let scope = plan.try_statement("select")?
+    if after != nil {
+      let continuation = after.resume(scope.text, scope.params, layout.ordering)
+        .map_err(|error| OrmError::InvalidPagination(error))?
+      plan = plan.filter(continuation.predicate, continuation.params)
+    }
+    plan = plan.cursor_columns(layout.columns, layout.ordering).limit(size + 1)
+    let rows = plan.try_statement("select")?.query(db)?
+    let has_next = rows.len() > size
+    let items: [T] = []
+    var index = 0
+    while index < rows.len() && index < size {
+      items.push(self.decode(rows[index])?)
+      index += 1
+    }
+    var next: QueryCursor? = nil
+    if has_next {
+      next = QueryCursor::capture(scope.text, scope.params, rows[size - 1], layout.aliases)
+        .map_err(|error| OrmError::InvalidPagination(error))?
+    }
+    return Result::Ok(CursorPage.new(items, next, has_next))
+  }
   fn limit(self, count: int) -> Projection<T> {
     return Projection.new(self.plan.limit(count), self.decode)
   }
   fn offset(self, count: int) -> Projection<T> {
     return Projection.new(self.plan.offset(count), self.decode)
   }
+}
+
+pub fn read_bytes(value: Any, column: str, model_name: str = "") -> Result<bytes, OrmError> {
+  if Database::is_bytes(value) { return Result::Ok(value as bytes) }
+  return Result::Err(decoding_error(model_name, column, "bytes"))
 }
 
 pub fn read_int(value: Any, column: str, model_name: str = "") -> Result<int, OrmError> {
@@ -347,8 +573,11 @@ pub fn read_bool(value: Any, column: str, model_name: str = "") -> Result<bool, 
 
 struct ModelOptions {
   table: str = "",
-  indexes: {str: [str]} = #{},
-  unique_indexes: {str: [str]} = #{},
+  primary_key: [FieldRef] = [],
+  foreign_keys: {str: ForeignKeyOptions} = #{},
+  advanced_indexes: {str: IndexOptions} = #{},
+  indexes: {str: [FieldRef]} = #{},
+  unique_indexes: {str: [FieldRef]} = #{},
 }
 
 /// Referential action applied by the database to a declared foreign key.
@@ -360,7 +589,39 @@ pub enum ForeignKeyAction {
   SetDefault,
 }
 
+/// Direction of one index term. Array order is significant.
+pub enum IndexDirection { Asc, Desc }
+/// Finite SQL expression vocabulary; no raw SQL is accepted.
+pub enum IndexTransform { Identity, Lower, Upper, Length, Abs }
+pub enum IndexPredicateKind { IsNull, IsNotNull, IsTrue, IsFalse }
+
+struct ForeignKeyOptions {
+  fields: [FieldRef],
+  references: [FieldRef],
+  on_delete: ForeignKeyAction = .NoAction,
+  on_update: ForeignKeyAction = .NoAction,
+}
+struct IndexTerm {
+  field: FieldRef,
+  transform: IndexTransform = .Identity,
+  direction: IndexDirection = .Asc,
+}
+struct IndexPredicate {
+  field: FieldRef,
+  kind: IndexPredicateKind = .IsNotNull,
+}
+struct IndexOptions {
+  terms: [IndexTerm],
+  unique: bool = false,
+  predicate: [IndexPredicate] = [],
+}
+
+/// Physical scalar representation of a domain codec.
+pub enum StorageType { Text, Integer, Real, Boolean, Binary }
+
 struct FieldOptions {
+  codec: TypeRef? = nil,
+  storage: StorageType = .Text,
   column: str = "",
   primary_key: bool = false,
   unique: bool = false,
@@ -393,8 +654,140 @@ fn column_name(field) -> str {
   return if field.opts.column == "" { field.name } else { field.opts.column }
 }
 
+/// Type-level primary_key is ordered; field flags are the legacy scalar form.
 @comptime
-fn index_spec(info, table_name: str, name: str, fields: [str], unique: bool) {
+fn model_primary_fields(info) {
+  let declared = model_option(info.decorators, "primary_key", [])
+  let legacy = info.fields.filter(|field| model_option(field.decorators, "primary_key", false))
+  if declared.len() > 0 && legacy.len() > 0 {
+    panic("orm: do not combine type-level primary_key with legacy field primary_key flags")
+  }
+  if declared.len() == 0 {
+    if legacy.len() != 1 { panic("orm: declare primary_key: [Model.field, ...] or one legacy primary_key field") }
+    return legacy
+  }
+  let keys = []
+  let names: [str] = []
+  for reference in declared {
+    if reference.owner.identity != info.identity { panic("orm: primary key field must belong to " + info.name) }
+    if names.contains(reference.name) { panic("orm: duplicate primary key field: " + reference.name) }
+    names.push(reference.name)
+    let fields = info.fields.filter(|field| field.name == reference.name)
+    if fields.len() != 1 { panic("orm: unknown primary key field: " + reference.name) }
+    keys.push(fields[0])
+  }
+  return keys
+}
+
+@comptime
+fn model_unique_fields(info, fields: [str]) -> bool {
+  let has_keys = model_option(info.decorators, "primary_key", []).len() > 0 || info.fields.filter(|field| model_option(field.decorators, "primary_key", false)).len() == 1
+  let primary = if has_keys { model_primary_fields(info).map(|field| field.name) } else { [] }
+  if primary == fields { return true }
+  if fields.len() == 1 && info.fields.filter(|field| field.name == fields[0] && model_option(field.decorators, "unique", false)).len() == 1 {
+    return true
+  }
+  let indexes = model_option(info.decorators, "unique_indexes", #{})
+  for name in indexes.keys() {
+    let references = indexes[name]
+    if references.map(|field| field.name) == fields && references.filter(|field| field.owner.identity != info.identity).len() == 0 {
+      return true
+    }
+  }
+  return false
+}
+
+@comptime
+fn composite_foreign_keys(info) -> [str] {
+  let result: [str] = []
+  for name in info.opts.foreign_keys.keys().sort() {
+    identifier(name)
+    let foreign = info.opts.foreign_keys[name]
+    if foreign.fields.len() == 0 || foreign.fields.len() != foreign.references.len() {
+      panic("orm: foreign key requires equally sized nonempty fields/references: " + name)
+    }
+    let parent = foreign.references[0].owner.info
+    let parent_identity = foreign.references[0].owner.identity
+    let fields: [str] = []
+    let references: [str] = []
+    for index in 0..foreign.fields.len() {
+      let local = foreign.fields[index]
+      let target = foreign.references[index]
+      if local.owner.identity != info.identity { panic("orm: foreign-key field must belong to " + info.name) }
+      if target.owner.identity != parent_identity { panic("orm: foreign-key references must belong to one model") }
+      if fields.contains(local.name) || references.contains(target.name) { panic("orm: repeated foreign-key field: " + name) }
+      if field_codec(local.info) != nil || field_codec(target.info) != nil { panic("orm: codec fields cannot be foreign keys") }
+      if field_kind(local.info) != field_kind(target.info) { panic("orm: foreign-key field type does not match referenced field") }
+      let source = info.fields.filter(|field| field.name == local.name)[0]
+      for action in [foreign.on_delete, foreign.on_update] {
+        if action == ForeignKeyAction::SetNull && !source.type.is_optional { panic("orm: SET NULL requires all foreign-key fields optional") }
+        if action == ForeignKeyAction::SetDefault && !source.type.is_optional && source.opts.default_sql == "" {
+          panic("orm: SET DEFAULT requires a SQL default on every required foreign-key field")
+        }
+      }
+      fields.push(local.name)
+      references.push(target.name)
+    }
+    if !model_unique_fields(parent, references) { panic("orm: foreign key must reference a complete primary, column UNIQUE or unique_indexes key in its declared order") }
+    let configured = model_option(parent.decorators, "table", "")
+    let table = if configured == "" { parent.name.lower() } else { configured }
+    let local_columns = foreign.fields.map(|field| identifier(reflected_column(field.info))).join(", ")
+    let target_columns = foreign.references.map(|field| identifier(reflected_column(field.info))).join(", ")
+    result.push("FOREIGN KEY (" + local_columns + ") REFERENCES " + identifier(table) + " (" + target_columns + ") ON DELETE " + foreign_action(foreign.on_delete) + " ON UPDATE " + foreign_action(foreign.on_update))
+  }
+  return result
+}
+
+@comptime
+fn advanced_index_spec(info, table_name: str, name: str, index) {
+  if index.terms.len() == 0 { panic("orm: index requires at least one term: " + name) }
+  let columns: [str] = []
+  let terms: [str] = []
+  var conflict = index.predicate.len() == 0
+  for term in index.terms {
+    let field = term.field
+    if field.owner.identity != info.identity { panic("orm: index field must belong to model " + info.name + ": " + name) }
+    let column = reflected_column(field.info)
+    let kind = field_kind(field.info)
+    var expression = identifier(column)
+    if term.transform != IndexTransform::Identity {
+      conflict = false
+      if field_codec(field.info) != nil { panic("orm: index transforms cannot operate on domain codecs") }
+      if term.transform == IndexTransform::Abs {
+        if kind != "int" && kind != "float" { panic("orm: Abs index transform requires a numeric field") }
+      } else if kind != "str" { panic("orm: text index transform requires a string field") }
+      let function = match term.transform {
+        .Lower => "LOWER", .Upper => "UPPER", .Length => "LENGTH", .Abs => "ABS", .Identity => "",
+      }
+      expression = function + "(" + expression + ")"
+    }
+    let direction = if term.direction == IndexDirection::Desc { " DESC" } else { " ASC" }
+    let sql = expression + direction
+    if terms.contains(sql) { panic("orm: duplicate index term: " + name) }
+    columns.push(column)
+    terms.push(sql)
+  }
+  let predicates: [str] = []
+  for predicate in index.predicate {
+    if predicate.field.owner.identity != info.identity { panic("orm: index predicate field must belong to model " + info.name) }
+    let field = predicate.field.info
+    if predicate.kind == IndexPredicateKind::IsTrue || predicate.kind == IndexPredicateKind::IsFalse {
+      if field_kind(field) != "bool" || field_codec(field) != nil { panic("orm: boolean index predicate requires a bool field") }
+    }
+    let suffix = match predicate.kind {
+      .IsNull => " IS NULL", .IsNotNull => " IS NOT NULL", .IsTrue => " = TRUE", .IsFalse => " = FALSE",
+    }
+    predicates.push(identifier(reflected_column(field)) + suffix)
+  }
+  let suffix = if index.unique { "_uidx" } else { "_idx" }
+  let sql_name = "zolo_{table_name.len()}_" + table_name + "_" + name + suffix
+  identifier(name)
+  identifier(sql_name)
+  return #{name, sql_name, columns, unique: index.unique, terms, predicate: predicates.join(" AND "), conflict}
+}
+
+@comptime
+fn index_spec_names(info, table_name: str, name: str, fields: [str], unique: bool) {
   identifier(name)
   if fields.len() == 0 { panic("orm: index requires at least one field: " + name) }
   let columns: [str] = []
@@ -408,7 +801,19 @@ fn index_spec(info, table_name: str, name: str, fields: [str], unique: bool) {
   let suffix = if unique { "_uidx" } else { "_idx" }
   let sql_name = "zolo_{table_name.len()}_" + table_name + "_" + name + suffix
   identifier(sql_name)
-  return #{name, sql_name, columns, unique}
+  return #{name, sql_name, columns, unique, terms: columns.map(|column| identifier(column)), predicate: "", conflict: true}
+}
+
+@comptime
+fn index_spec(info, table_name: str, name: str, fields: [FieldRef], unique: bool) {
+  let names: [str] = []
+  for field in fields {
+    if field.owner.identity != info.identity {
+      panic("orm: index field must belong to model " + info.name + ": " + name)
+    }
+    names.push(field.name)
+  }
+  return index_spec_names(info, table_name, name, names, unique)
 }
 
 @comptime
@@ -419,7 +824,7 @@ fn model_indexes(info, table_name: str) {
     if field.opts.index {
       if seen.contains(field.name.lower()) { panic("orm: duplicate index name: " + field.name) }
       seen.push(field.name.lower())
-      indexes.push(index_spec(info, table_name, field.name, [field.name], false))
+      indexes.push(index_spec_names(info, table_name, field.name, [field.name], false))
     }
   }
   for name in info.opts.indexes.keys().sort() {
@@ -431,6 +836,11 @@ fn model_indexes(info, table_name: str) {
     if seen.contains(name.lower()) { panic("orm: duplicate index name: " + name) }
     seen.push(name.lower())
     indexes.push(index_spec(info, table_name, name, info.opts.unique_indexes[name], true))
+  }
+  for name in info.opts.advanced_indexes.keys().sort() {
+    if seen.contains(name.lower()) { panic("orm: duplicate index name: " + name) }
+    seen.push(name.lower())
+    indexes.push(advanced_index_spec(info, table_name, name, info.opts.advanced_indexes[name]))
   }
   return indexes
 }
@@ -489,12 +899,7 @@ fn foreign_key_clause(field) -> str {
   if parent.kind != "struct" { panic("orm: foreign-key target must be a model struct") }
   let target = relation_field(field)
   if field_kind(target) != field_kind(field) { panic("orm: foreign-key field type does not match referenced field") }
-  var unique = model_option(target.decorators, "primary_key", false) || model_option(target.decorators, "unique", false)
-  let unique_indexes = model_option(parent.decorators, "unique_indexes", #{})
-  for name in unique_indexes.keys() {
-    let fields = unique_indexes[name]
-    if fields.len() == 1 && fields[0] == target.name { unique = true }
-  }
+  let unique = model_unique_fields(parent, [target.name])
   if !unique { panic("orm: foreign-key target must be a primary key or a single-field UNIQUE key") }
   let parent_table = model_option(parent.decorators, "table", "")
   let table_name = if parent_table == "" { parent.name.lower() } else { parent_table }
@@ -513,7 +918,56 @@ fn foreign_key_clause(field) -> str {
 
 @comptime
 fn field_kind(field) -> str {
+  if field_codec(field) != nil {
+    return match model_option(field.decorators, "storage", StorageType::Text) {
+      StorageType::Text => "str",
+      StorageType::Integer => "int",
+      StorageType::Real => "float",
+      StorageType::Boolean => "bool",
+      StorageType::Binary => "bytes",
+      _ => panic("orm: unsupported codec storage"),
+    }
+  }
   return if field.type.is_optional { field.type.inner.kind } else { field.type.kind }
+}
+
+@comptime
+fn field_codec(field) {
+  return model_option(field.decorators, "codec", nil)
+}
+
+@comptime
+fn storage_type(field) -> Syntax<.Type> {
+  return match field_kind(field) {
+    "str" => quote type { str },
+    "int" => quote type { int },
+    "float" => quote type { float },
+    "bool" => quote type { bool },
+    "bytes" => quote type { bytes },
+    _ => panic("orm: unsupported storage type"),
+  }
+}
+
+@comptime
+fn encoded_value(field, owner: Syntax<.Ident>, input: Syntax<.Expr>) -> Syntax<.Expr> {
+  if field_codec(field) == nil { return input }
+  let encoder = syntax.ident("__orm_encode_" + field.name)
+  return quote expr { ${owner}::${encoder}(${input}) }
+}
+
+@comptime
+fn query_schema_field(field, column: str) -> Syntax<.Member> {
+  let codec = field_codec(field)
+  if codec == nil {
+    return quote member {
+      @sql_column(name: ${column})
+      pub ${field.member}: ${field.type.ref},
+    }
+  }
+  return quote member {
+    @sql_column(name: ${column}, storage: ${field_kind(field)}, encoder: ${"__orm_encode_" + field.name}, codec: ${codec.identity})
+    pub ${field.member}: ${field.type.ref},
+  }
 }
 
 @comptime
@@ -534,7 +988,13 @@ fn decode_field(field, owner: str) -> Syntax<.Expr> {
 @comptime
 fn decode_value(field, owner: str, input: Syntax<.Expr>) -> Syntax<.Expr> {
   let reader = syntax.ident("read_" + field_kind(field))
-  let value = quote expr { ${reader}(${input}, ${field.name}, ${owner})? }
+  let scalar = quote expr { ${reader}(${input}, ${field.name}, ${owner})? }
+  let codec = field_codec(field)
+  let value = if codec == nil { scalar } else {
+    quote expr {
+      ${codec.ref}::decode(${scalar}).map_err(|_| decoding_error(${owner}, ${field.name}, ${field.type.name}))?
+    }
+  }
   if field.type.is_optional {
     return quote expr {
       {
@@ -545,6 +1005,56 @@ fn decode_value(field, owner: str, input: Syntax<.Expr>) -> Syntax<.Expr> {
     }
   }
   return value
+}
+
+@comptime
+fn scalar_readers(owner: str, error_type: Syntax<.Ident>) {
+  let members = []
+  for kind in ["int", "float", "str", "bool"] {
+    let reader = syntax.ident("read_" + kind)
+    let method = syntax.ident("__orm_scalar_" + kind)
+    let optional = syntax.ident("__orm_scalar_optional_" + kind)
+    let value_type = match kind {
+      "int" => quote type { int }, "float" => quote type { float },
+      "str" => quote type { str }, _ => quote type { bool },
+    }
+    members.push(quote member {
+      pub fn ${method}(row: Any, column: str) -> Result<${value_type}, ${error_type}> {
+        return ${reader}(row[column], column, ${owner})
+      }
+      pub fn ${optional}(row: Any, column: str) -> Result<${value_type}?, ${error_type}> {
+        if row[column] == nil { return Result::Ok(nil) }
+        let value = ${reader}(row[column], column, ${owner})?
+        return Result::Ok(value)
+      }
+    })
+  }
+  return members
+}
+
+@comptime
+fn query_expression_methods(query: Syntax<.Ident>, row_types, error_type: Syntax<.Ident>, projection: Syntax<.Ident>) -> Syntax<.Member> {
+  return quote member {
+    pub fn group_by<G>(self, key: fn(${..row_types}) -> G) -> ${query} {
+      let _ = self
+      let _ = key
+      panic("orm: GROUP BY expression was not compiled")
+    }
+    pub fn having(self, predicate: fn(${..row_types}) -> bool) -> ${query} {
+      let _ = self
+      let _ = predicate
+      panic("orm: HAVING expression was not compiled")
+    }
+    pub fn group_plan(self, columns: [Any]) -> ${query} {
+      return ${query}.new(self.plan.group(columns))
+    }
+    pub fn having_plan(self, predicate: Any, bindings: [Any]) -> ${query} {
+      return ${query}.new(self.plan.having(predicate, bindings))
+    }
+    pub fn project_expr<R>(self, columns: [Any], bindings: [Any], decode: fn(Any) -> Result<R, ${error_type}>) -> ${projection}<R> {
+      return ${projection}.new(self.plan.project_expr(columns, bindings), decode)
+    }
+  }
 }
 
 /// Generates nominal decoding, CRUD, batched inserts, and a query API whose
@@ -558,6 +1068,8 @@ pub fn Model(info) -> Syntax<.Items> {
   while (batch_capacity + 1) * info.fields.len() <= 900 { batch_capacity = batch_capacity + 1 }
   let table_name = if info.opts.table == "" { info.name.lower() } else { info.opts.table }
   let table = identifier(table_name)
+  let keys = model_primary_fields(info)
+  let key_names = keys.map(|field| field.name)
   var seen: [str] = []
   var query_names: [str] = []
   for field in info.fields {
@@ -566,15 +1078,30 @@ pub fn Model(info) -> Syntax<.Items> {
     if seen.contains(name.lower()) { panic("orm: duplicate column: " + name) }
     seen.push(name.lower())
     let kind = field_kind(field)
-    if kind != "int" && kind != "str" && kind != "float" && kind != "bool" {
+    let codec = field_codec(field)
+    if codec != nil && (key_names.contains(field.name) || field.opts.generated || field.opts.belongs_to != nil) {
+      panic("orm: codec fields cannot be primary, generated or relation keys")
+    }
+    if codec != nil {
+      let domain = if field.type.is_optional { field.type.inner } else { field.type }
+      let structural = ["list", "map", "union"].contains(domain.kind)
+      let anonymous = domain.name.starts_with("(") || domain.name.starts_with("{") || domain.name.starts_with("fn(")
+      if structural || anonymous || domain.name == "Any" || domain.name == "any" {
+        panic("orm: codec domains require a scalar or named type; wrap collections in a newtype")
+      }
+    }
+    if codec == nil && model_option(field.decorators, "storage", nil) != nil {
+      panic("orm: storage requires a codec")
+    }
+    if kind != "int" && kind != "str" && kind != "float" && kind != "bool" && !(kind == "bytes" && codec != nil) {
       panic(
         "orm: unsupported field type " + field.type.name + " on " + info.name + "." + field.name,
       )
     }
-    if field.opts.primary_key && field.type.is_optional {
+    if key_names.contains(field.name) && field.type.is_optional {
       panic("orm: primary key cannot be optional")
     }
-    if field.opts.generated && (!field.opts.primary_key || kind != "int") {
+    if field.opts.generated && (keys.len() != 1 || !key_names.contains(field.name) || kind != "int") {
       panic("orm: generated requires an integer primary key")
     }
     if field.opts.generated && field.opts.default_sql != "" {
@@ -594,15 +1121,17 @@ pub fn Model(info) -> Syntax<.Items> {
     }
     if field.opts.belongs_to != nil {
       let referenced = relation_field(field)
+      if field_codec(referenced) != nil { panic("orm: codec fields cannot be referenced relation keys") }
       if field_kind(referenced) != field_kind(field) {
         panic("orm: foreign-key field type does not match referenced field")
       }
     }
     let methods = [
       "where_" + field.name, "where_" + field.name + "_not",
-      "where_" + field.name + "_in", "order_by_" + field.name,
+      "where_" + field.name + "_in",
     ]
-    if kind != "bool" {
+    if codec == nil { methods.push("order_by_" + field.name) }
+    if kind != "bool" && codec == nil {
       methods.push("where_" + field.name + "_gt")
       methods.push("where_" + field.name + "_lt")
     }
@@ -615,10 +1144,24 @@ pub fn Model(info) -> Syntax<.Items> {
       query_names.push(method)
     }
   }
-  let keys = info.fields.filter(|field| field.opts.primary_key)
-  if keys.len() != 1 { panic("orm: declare exactly one @model(primary_key: true) field") }
   let key = keys[0]
-  let key_column = identifier(column_name(key))
+  let key_columns = keys.map(|field| column_name(field))
+  let quoted_keys = key_columns.map(|column| identifier(column))
+  let key_where = quoted_keys.map(|column| column + " = ?").join(" AND ")
+  let key_name = generated_local(info, info.name + "Key")
+  let key_type = if keys.len() == 1 { key.type.ref } else { quote type { ${key_name} } }
+  let key_fields = keys.map(|field| quote member { pub ${field.member}: ${field.type.ref}, })
+  let key_struct = if keys.len() == 1 { quote items {} } else { quote items { pub struct ${key_name} { ${..key_fields} } } }
+  let self_keys = keys.map(|field| quote expr { self.${field.member} })
+  let key_values = keys.map(|field| if keys.len() == 1 { quote expr { key } } else { quote expr { key.${field.member} } })
+  let key_expr = if keys.len() == 1 { quote expr { self.${key.member} } } else {
+    let fields = keys.map(|field| quote member { ${field.member}: self.${field.member}, })
+    quote expr { ${key_name} { ${..fields} } }
+  }
+  let key_filters = keys.map(|field| {
+    let value = if keys.len() == 1 { quote expr { key } } else { quote expr { key.${field.member} } }
+    return quote stmt { plan = plan.equal(${column_name(field)}, ${value}) }
+  })
   let query = syntax.ident(info.name + "Query")
   var schema_name = info.name + "Schema"
   while info.fields.filter(|field| field.name == schema_name).len() > 0 {
@@ -626,7 +1169,15 @@ pub fn Model(info) -> Syntax<.Items> {
   }
   let schema_type = syntax.ident(schema_name)
   let changes = syntax.ident(info.name + "Changes")
+  let unchanged_alias = generated_local(info, "__orm_" + info.name + "_Unchanged")
+  let patch_var = generated_local(info, "__orm_patch")
+  let invalid_patch_alias = generated_local(info, "__orm_" + info.name + "_invalid_patch_value")
   let insert_type = generated_local(info, info.name + "Insert")
+  let row_alias = generated_local(info, "__orm_" + info.name + "_Row")
+  let page_alias = generated_local(info, "__orm_" + info.name + "_Page")
+  let page_result_alias = generated_local(info, "__orm_" + info.name + "_page_result")
+  let cursor_alias = generated_local(info, "__orm_" + info.name + "_CursorPage")
+  let token_alias = generated_local(info, "__orm_" + info.name + "_QueryCursor")
   let indexes = model_indexes(info, table_name)
   let column_names = info.fields.map(|field| column_name(field))
   let names = info.fields.map(|field| identifier(column_name(field)))
@@ -644,21 +1195,24 @@ pub fn Model(info) -> Syntax<.Items> {
         "str" => "TEXT",
         "float" => "DOUBLE PRECISION",
         "bool" => "BOOLEAN",
+        "bytes" => "BLOB",
         _ => "TEXT",
       }
       let nullable = if field.type.is_optional { "" } else { " NOT NULL" }
-      let primary = if field.opts.primary_key { " PRIMARY KEY" } else { "" }
+      let primary = if keys.len() == 1 && key_names.contains(field.name) { " PRIMARY KEY" } else { "" }
       let unique = if field.opts.unique { " UNIQUE" } else { "" }
       let database_default = if field.opts.default_sql == "" { "" } else { " DEFAULT " + field.opts.default_sql }
       return identifier(column_name(field)) + " " + sql_type + nullable + primary + unique + database_default + foreign
     },
   )
+  if keys.len() > 1 { ddl_columns.push("PRIMARY KEY (" + quoted_keys.join(", ") + ")") }
+  for foreign in composite_foreign_keys(info) { ddl_columns.push(foreign) }
   let table_ddl = "CREATE TABLE IF NOT EXISTS " + table + " (" + ddl_columns.join(", ") + ")"
   let ddl_statements = [table_ddl]
   for index in indexes {
     let unique = if index.unique { "UNIQUE " } else { "" }
-    let index_columns = index.columns.map(|column| identifier(column)).join(", ")
-    ddl_statements.push("CREATE " + unique + "INDEX IF NOT EXISTS " + identifier(index.sql_name) + " ON " + table + " (" + index_columns + ")")
+    let predicate = if index.predicate == "" { "" } else { " WHERE " + index.predicate }
+    ddl_statements.push("CREATE " + unique + "INDEX IF NOT EXISTS " + identifier(index.sql_name) + " ON " + table + " (" + index.terms.join(", ") + ")" + predicate)
   }
   let ddl = ddl_statements.join(";\n")
   let decode = info.fields.map(
@@ -667,19 +1221,10 @@ pub fn Model(info) -> Syntax<.Items> {
       return quote member { ${field.member}: ${value}, }
     },
   )
-  var reader_kinds: [str] = []
+  var reader_kinds: [str] = ["int", "float", "str", "bool"]
   for field in info.fields {
     let kind = field_kind(field)
     if !reader_kinds.contains(kind) { reader_kinds.push(kind) }
-  }
-  for relation in info.fields.filter(|field| field.opts.belongs_to != nil) {
-    let parent = relation.opts.belongs_to.info
-    if parent != nil {
-      for field in parent.fields {
-        let kind = field_kind(field)
-        if !reader_kinds.contains(kind) { reader_kinds.push(kind) }
-      }
-    }
   }
   let reader_imports = reader_kinds.map(
     |kind| {
@@ -687,15 +1232,36 @@ pub fn Model(info) -> Syntax<.Items> {
       return quote items { use orm::{${reader}} }
     },
   )
-  let values = info.fields.map(|field| quote expr { bind_value(params, self.${field.member}) })
-  let insert_values = info.fields.map(|field| quote expr { bind_value(params, insert.${field.member}) })
+  let encoders = info.fields.filter(|field| field_codec(field) != nil).map(|field| {
+    let codec = field_codec(field)
+    let method = syntax.ident("__orm_encode_" + field.name)
+    let stored_type = storage_type(field)
+    if field.type.is_optional {
+      return quote member {
+        pub fn ${method}(value: ${field.type.ref}) -> ${stored_type}? {
+          if value == nil { return nil }
+          return ${codec.ref}::encode(value)
+        }
+      }
+    }
+    return quote member {
+      pub fn ${method}(value: ${field.type.ref}) -> ${stored_type} {
+        return ${codec.ref}::encode(value)
+      }
+    }
+  })
+  let values = info.fields.map(|field| {
+    let value = encoded_value(field, schema_type, quote expr { self.${field.member} })
+    return quote expr { bind_value(params, ${value}) }
+  })
+  let insert_values = info.fields.map(|field| {
+    let value = encoded_value(field, schema_type, quote expr { insert.${field.member} })
+    return quote expr { bind_value(params, ${value}) }
+  })
   let schema_fields = info.fields.map(
     |field| {
       let column = column_name(field)
-      return quote member {
-      @sql_column(name: ${column})
-      pub ${field.member}: ${field.type.ref},
-    }
+      return query_schema_field(field, column)
     },
   )
   let schema_readers = info.fields.map(
@@ -710,6 +1276,8 @@ pub fn Model(info) -> Syntax<.Items> {
     }
     },
   )
+  let scalar_methods = scalar_readers(info.name, syntax.ident("OrmError"))
+  let expression_methods = query_expression_methods(query, [quote type { ${schema_type} }], syntax.ident("OrmError"), syntax.ident("Projection"))
   let query_methods = info.fields.map(
     |field| {
       let filter = syntax.ident("where_" + field.name)
@@ -718,25 +1286,31 @@ pub fn Model(info) -> Syntax<.Items> {
       let order = syntax.ident("order_by_" + field.name)
       let column = column_name(field)
       let base_type = if field.type.is_optional { field.type.inner.ref } else { field.type.ref }
+      let value = encoded_value(field, schema_type, quote expr { value })
+      let ordering = if field_codec(field) == nil {
+        quote member {
+          pub fn ${order}(self, descending: bool = false) -> ${query} {
+            return ${query}.new(self.plan.order(${column}, descending))
+          }
+        }
+      } else { quote member {} }
       return quote member {
       pub fn ${filter}(self, value: ${field.type.ref}) -> ${query} {
-        return ${query}.new(self.plan.equal(${column}, value))
+        return ${query}.new(self.plan.equal(${column}, ${value}))
       }
       pub fn ${exclude}(self, value: ${field.type.ref}) -> ${query} {
-        return ${query}.new(self.plan.not_equal(${column}, value))
+        return ${query}.new(self.plan.not_equal(${column}, ${value}))
       }
       pub fn ${within}(self, values: [${base_type}]) -> ${query} {
         let bindings: [Any] = []
-        for value in values { bindings.push(value) }
+        for value in values { bindings.push(${value}) }
         return ${query}.new(self.plan.within(${column}, bindings))
       }
-      pub fn ${order}(self, descending: bool = false) -> ${query} {
-        return ${query}.new(self.plan.order(${column}, descending))
-      }
+      ${ordering}
     }
     },
   )
-  let ordered_fields = info.fields.filter(|field| field_kind(field) != "bool")
+  let ordered_fields = info.fields.filter(|field| field_kind(field) != "bool" && field_codec(field) == nil)
   let comparisons = ordered_fields.map(
     |field| {
       let greater = syntax.ident("where_" + field.name + "_gt")
@@ -753,7 +1327,7 @@ pub fn Model(info) -> Syntax<.Items> {
     }
     },
   )
-  let nonkeys = info.fields.filter(|field| !field.opts.primary_key)
+  let nonkeys = info.fields.filter(|field| !key_names.contains(field.name))
   let relations = info.fields.filter(|field| field.opts.belongs_to != nil).map(
     |field| {
       let parent_type = field.opts.belongs_to.ref
@@ -812,44 +1386,41 @@ pub fn Model(info) -> Syntax<.Items> {
   )
   let join_items = []
   let join_methods = []
-  let join_readers = []
+  let join_proxies = []
   for relation in info.fields.filter(|field| field.opts.belongs_to != nil) {
     let parent = relation.opts.belongs_to.info
     // A loader can accept plain parent records. SQL joins require model key metadata.
     if parent != nil && parent.kind == "struct" {
-      let parent_keys = parent.fields.filter(|field| model_option(field.decorators, "primary_key", false))
-      if parent_keys.len() == 1 {
+      let has_keys = model_option(parent.decorators, "primary_key", []).len() > 0 || parent.fields.filter(|field| model_option(field.decorators, "primary_key", false)).len() == 1
+      let parent_keys = if has_keys { model_primary_fields(parent) } else { [] }
+      if parent_keys.len() > 0 {
         let parent_key = parent_keys[0]
-        if parent_key.type.is_optional { panic("orm: joined model primary key cannot be optional") }
+        if parent_keys.filter(|field| field.type.is_optional).len() > 0 { panic("orm: joined model primary key cannot be optional") }
         let referenced = relation_field(relation)
         if field_kind(referenced) != field_kind(relation) { panic("orm: joined fields require matching scalar types") }
         let parent_type = relation.opts.belongs_to.ref
         let configured_table = model_option(parent.decorators, "table", "")
         let parent_table = if configured_table == "" { parent.name.lower() } else { configured_table }
         let reference_column = reflected_column(referenced)
-        let view_name = "__OrmJoin_{info.name.len()}_" + info.name + "_" + relation.name + "_Schema"
-        let view_type = syntax.ident(view_name)
-        let view_fields = parent.fields.map(|field| {
-          let column = reflected_column(field)
-          return quote member {
-            @sql_column(name: ${column})
-            pub ${field.member}: ${field.type.ref},
-          }
-        })
-        var reader_prefix = "__orm_join_{relation.name.len()}_" + relation.name + "_read_"
-        while info.fields.filter(|field| field.name.starts_with(reader_prefix)).len() > 0 {
-          reader_prefix = "_" + reader_prefix
-        }
-        let view_readers = parent.fields.map(|field| {
-          let reader = syntax.ident(reader_prefix + field.name)
-          let column = reflected_column(field)
-          let value = decode_value(field, parent.name, quote expr { row[column] })
-          return quote member {
-            pub fn ${reader}(row: Any, column: str = ${column}) -> Result<${field.type.ref}, OrmError> {
-              return Result::Ok(${value})
+        let proxy_prefix = "__orm_join_{relation.name.len()}_" + relation.name + "_"
+        for field in parent.fields {
+          let reader = syntax.ident(proxy_prefix + "read_" + field.name)
+          let parent_reader = syntax.ident("read_" + field.name)
+          join_proxies.push(quote member {
+            pub fn ${reader}(__orm_row: Any, __orm_column: str) {
+              return ${parent_type}::${parent_reader}(__orm_row, __orm_column)
             }
+          })
+          if field_codec(field) != nil {
+            let encoder = syntax.ident(proxy_prefix + "__orm_encode_" + field.name)
+            let parent_encoder = syntax.ident("__orm_encode_" + field.name)
+            join_proxies.push(quote member {
+              pub fn ${encoder}(__orm_value: Any) {
+                return ${parent_type}::${parent_encoder}(__orm_value)
+              }
+            })
           }
-        })
+        }
         // Dedicated output aliases distinguish equal/mapped names and self joins.
         let joined_columns = []
         let left_copy = []
@@ -872,18 +1443,13 @@ pub fn Model(info) -> Syntax<.Items> {
           if field.name == parent_key.name { presence_alias = alias }
           ordinal = ordinal + 1
         }
-        join_items.push(quote items {
-          @sql_schema(table: ${parent_table}, source: ${relation.opts.belongs_to.binding}, query_only: true)
-          pub struct ${view_type} { ${..view_fields} }
-        })
-        for reader in view_readers { join_readers.push(reader) }
         for mode in ["inner", "left"] {
           let optional = mode == "left"
           let joined_name = "__OrmJoin_{info.name.len()}_" + info.name + "_" + relation.name + "_" + mode
           let joined_type = syntax.ident(joined_name)
           let method = syntax.ident(mode + "_join_" + relation.name)
           let right_type = if optional { quote type { ${parent_type}? } } else { quote type { ${parent_type} } }
-          let row_type = if optional { quote type { ${view_type}? } } else { quote type { ${view_type} } }
+          let row_type = right_type
           let read_right = if optional {
             quote stmt {
               var right: ${parent_type}? = nil
@@ -891,7 +1457,7 @@ pub fn Model(info) -> Syntax<.Items> {
             }
           } else { quote stmt { let right = ${parent_type}::from_row(right_row)? } }
           let ordering = []
-          for field in info.fields {
+          for field in info.fields.filter(|field| field_codec(field) == nil) {
             let order = syntax.ident("order_by_left_" + field.name)
             let column = column_name(field)
             ordering.push(quote member {
@@ -900,7 +1466,7 @@ pub fn Model(info) -> Syntax<.Items> {
               }
             })
           }
-          for field in parent.fields {
+          for field in parent.fields.filter(|field| field_codec(field) == nil) {
             let order = syntax.ident("order_by_right_" + field.name)
             let column = reflected_column(field)
             ordering.push(quote member {
@@ -909,20 +1475,39 @@ pub fn Model(info) -> Syntax<.Items> {
               }
             })
           }
+          let joined_page_keys = keys.map(|field| quote expr { #{table: "orm_l", column: ${column_name(field)}} })
+          for field in parent_keys { joined_page_keys.push(quote expr { #{table: "orm_r", column: ${reflected_column(field)}} }) }
           join_methods.push(quote member {
             pub fn ${method}(self) -> ${joined_type} {
-              return ${joined_type}.new(self.plan.join(${parent_table}, ${mode}, ${column_name(relation)}, ${reference_column}, [${..joined_columns}]))
+              return ${joined_type}.new(self.plan.join(
+                ${parent_table}, ${mode}, ${column_name(relation)}, ${reference_column}, [${..joined_columns}],
+                [${..joined_page_keys}],
+              ))
             }
           })
+          let join_expressions = query_expression_methods(joined_type, [quote type { ${schema_type} }, row_type], syntax.ident("OrmError"), syntax.ident("Projection"))
           join_items.push(quote items {
             @sql_query(sources: [
               #{schema: ${schema_name}, alias: "orm_l", reader_type: ${info.name}},
-              #{schema: ${view_name}, alias: "orm_r", reader_type: ${info.name}, reader: ${reader_prefix}, nullable: ${optional}, presence: ${parent_key.name}},
-            ], filter: "filter_plan", select: "project", on: "on_plan")
+              #{source: ${relation.opts.belongs_to.binding}, alias: "orm_r", reader_type: ${info.name}, reader: ${proxy_prefix + "read_"}, encoder_prefix: ${proxy_prefix}, nullable: ${optional}, presence: ${parent_key.name}},
+            ], filter: "filter_plan", select: "project", group_by: "group_plan", having: "having_plan", computed: "project_expr", scalar_reader: "__orm_scalar_", on: "on_plan")
             pub struct ${joined_type} { pub plan: QueryPlan, }
             impl ${joined_type} {
               ${..ordering}
-              pub fn on(self, predicate: fn(${schema_type}, ${view_type}) -> bool) -> ${joined_type} {
+              ${join_expressions}
+              pub fn decode_row(row: Any) -> Result<Joined<${info.ref}, ${right_type}>, OrmError> {
+                let left_row: Any = #{}
+                let right_row: Any = #{}
+                ${..left_copy}
+                ${..right_copy}
+                let left = ${info.ref}::from_row(left_row)?
+                ${read_right}
+                return Result::Ok(Joined.new(left, right))
+              }
+              pub fn seek_page(self, db: Database, size: int = 20, after: ${token_alias}? = nil) -> Result<${cursor_alias}<Joined<${info.ref}, ${right_type}>, ${token_alias}>, OrmError> {
+                return Projection.new(self.plan, |row| ${joined_type}::decode_row(row)).seek_page(db, size, after)
+              }
+              pub fn on(self, predicate: fn(${schema_type}, ${parent_type}) -> bool) -> ${joined_type} {
                 let _ = self
                 let _ = predicate
                 panic("orm: join expression was not compiled")
@@ -956,15 +1541,7 @@ pub fn Model(info) -> Syntax<.Items> {
                 let statement = self.try_statement()?
                 let rows = statement.query(db)?
                 let result: [Joined<${info.ref}, ${right_type}>] = []
-                for row in rows {
-                  let left_row: Any = #{}
-                  let right_row: Any = #{}
-                  ${..left_copy}
-                  ${..right_copy}
-                  let left = ${info.ref}::from_row(left_row)?
-                  ${read_right}
-                  result.push(Joined.new(left, right))
-                }
+                for row in rows { result.push(${joined_type}::decode_row(row)?) }
                 return Result::Ok(result)
               }
               pub fn first(self, db: Database) -> Result<Joined<${info.ref}, ${right_type}>?, OrmError> {
@@ -972,6 +1549,23 @@ pub fn Model(info) -> Syntax<.Items> {
                 let rows = self.limit(1).all(db)?
                 if rows.len() == 0 { return Result::Ok(nil) }
                 return Result::Ok(rows[0])
+              }
+              pub fn first_row(self, db: Database) -> Result<${row_alias}<Joined<${info.ref}, ${right_type}>>?, OrmError> {
+                if self.plan.take == 0 { return Result::Ok(nil) }
+                let rows = self.limit(1).all(db)?
+                if rows.len() == 0 { return Result::Ok(nil) }
+                return Result::Ok(${row_alias}.new(rows[0]))
+              }
+              pub fn first_or_error(self, db: Database) -> Result<Joined<${info.ref}, ${right_type}>, OrmError> {
+                let row = self.first_row(db)?
+                if row == nil { return Result::Err(OrmError::NotFound(${info.name})) }
+                return Result::Ok(row.value)
+              }
+              pub fn page(self, db: Database, number: int = 1, size: int = 20) -> Result<${page_alias}<Joined<${info.ref}, ${right_type}>>, OrmError> {
+                let plan = self.plan.for_page(number, size)?
+                let total = self.plan.count(db)?
+                let items = ${joined_type}.new(plan).all(db)?
+                return Result::Ok(${page_result_alias}(items, number, size, total))
               }
             }
           })
@@ -987,13 +1581,40 @@ pub fn Model(info) -> Syntax<.Items> {
     |field| {
       let setter = syntax.ident("set_" + field.name)
       let column = identifier(column_name(field))
+      let value = encoded_value(field, schema_type, quote expr { value })
       return quote member {
       pub fn ${setter}(self, value: ${field.type.ref}) -> ${changes} {
-        return ${changes}.new(self.plan.set(${column}, value))
+        return ${changes}.new(self.plan.set(${column}, ${value}))
       }
     }
     },
   )
+  let change_params = nonkeys.map(|field| quote param {
+    ${field.member}: ${field.type.ref} | ${unchanged_alias} = ${unchanged_alias}.new()
+  })
+  let change_assignments = nonkeys.map(|field| {
+    let setter = syntax.ident("set_" + field.name)
+    let base_type = if field.type.is_optional { field.type.inner.ref } else { field.type.ref }
+    let invalid = "orm: invalid patch value for " + info.name + "." + field.name
+    if field.type.is_optional {
+      return quote stmt {
+        if ${field.member} is ${base_type} {
+          ${patch_var} = ${patch_var}.${setter}(${field.member})
+        } else if ${field.member} == nil {
+          ${patch_var} = ${patch_var}.${setter}(nil)
+        } else if !(${field.member} is ${unchanged_alias}) {
+          ${invalid_patch_alias}(${invalid})
+        }
+      }
+    }
+    return quote stmt {
+      if ${field.member} is ${base_type} {
+        ${patch_var} = ${patch_var}.${setter}(${field.member})
+      } else if !(${field.member} is ${unchanged_alias}) {
+        ${invalid_patch_alias}(${invalid})
+      }
+    }
+  })
   let inputs = info.fields.filter(|field| !field.opts.generated)
   let connection_var = generated_local(info, "db")
   let bindings_var = generated_local(info, "__orm_bindings")
@@ -1036,11 +1657,12 @@ pub fn Model(info) -> Syntax<.Items> {
       return quote member { pub ${field.member}: ${field.type.ref}, }
     },
   )
-  let conflict_targets = []
-  let conflict_names: [str] = []
+  let conflict_targets = [#{method: "upsert_by_key", columns: quoted_keys.join(", ")}]
+  let conflict_names: [str] = ["upsert_by_key", "upsert_by_key_statement"]
   for field in info.fields {
-    if field.opts.primary_key || field.opts.unique {
+    if keys.len() == 1 && key_names.contains(field.name) || field.opts.unique {
       let method = "upsert_by_" + field.name
+      if method == "upsert_by_key" && keys.len() == 1 && key_names.contains(field.name) { continue }
       for name in [method, method + "_statement"] {
         if conflict_names.contains(name) { panic("orm: generated upsert method collision: " + name) }
         conflict_names.push(name)
@@ -1049,7 +1671,7 @@ pub fn Model(info) -> Syntax<.Items> {
     }
   }
   for index in indexes {
-    if index.unique {
+    if index.unique && index.conflict {
       let method = "upsert_by_index_" + index.name
       for name in [method, method + "_statement"] {
         if conflict_names.contains(name) { panic("orm: generated upsert method collision: " + name) }
@@ -1075,9 +1697,10 @@ pub fn Model(info) -> Syntax<.Items> {
     }
     },
   )
-  let create_slots = inputs.map(
-    |field| quote expr { ${binder_alias}(${bindings_var}, ${field.member}) },
-  )
+  let create_slots = inputs.map(|field| {
+    let value = encoded_value(field, schema_type, quote expr { ${field.member} })
+    return quote expr { ${binder_alias}(${bindings_var}, ${value}) }
+  })
   let create_columns = inputs.map(|field| identifier(column_name(field))).join(", ")
   let create_prefix = "INSERT INTO " + table + " (" + create_columns + ") VALUES ("
   let returning = " RETURNING " + columns
@@ -1086,35 +1709,71 @@ pub fn Model(info) -> Syntax<.Items> {
   } else {
     quote expr { ${create_prefix} + ${slots_var}.join(", ") + ${")" + returning} }
   }
-  let update_values = nonkeys.map(
-    |field| quote expr { ${identifier(column_name(field)) + " = "} + bind_value(params, self.${field.member}) },
-  )
+  let update_values = nonkeys.map(|field| {
+    let value = encoded_value(field, schema_type, quote expr { self.${field.member} })
+    return quote expr { ${identifier(column_name(field)) + " = "} + bind_value(params, ${value}) }
+  })
   let save = if nonkeys.len() == 0 { quote member {} } else {
     quote member {
     pub fn update(self, db: Database) -> Result<int, OrmError> {
       let params: [Any] = []
       let assignments = [${..update_values}]
-      params.push(self.${key.member})
-      return Statement.new(${"UPDATE " + table + " SET "} + assignments.join(", ") + ${" WHERE " + key_column + " = ?"}, params).execute(db)
+      for value in [${..self_keys}] { params.push(value) }
+      return Statement.new(${"UPDATE " + table + " SET "} + assignments.join(", ") + ${" WHERE " + key_where}, params).execute(db)
     }
   }
   }
+  let cursor_method = if keys.len() == 1 && (field_kind(key) == "int" || field_kind(key) == "str") {
+    quote member {
+      pub fn cursor_page(
+        self, db: Database, size: int = 20, after: ${key.type.ref}? = nil, descending: bool = false,
+      ) -> Result<${cursor_alias}<${info.ref}, ${key.type.ref}>, OrmError> {
+        let plan = self.plan.for_cursor(${column_name(key)}, size, after, descending)?
+        let statement = plan.try_statement("select")?
+        let rows = statement.query(db)?
+        let has_next = rows.len() > size
+        let items: [${info.ref}] = []
+        var index = 0
+        while index < rows.len() && index < size {
+          items.push(${info.ref}::from_row(rows[index])?)
+          index += 1
+        }
+        var next_cursor: ${key.type.ref}? = nil
+        if has_next { next_cursor = items[items.len() - 1].${key.member} }
+        return Result::Ok(${cursor_alias}.new(items, next_cursor, has_next))
+      }
+    }
+  } else { quote member {} }
+  let cursor_import = quote items {
+    use orm::CursorPage as ${cursor_alias}
+    use orm::QueryCursor as ${token_alias}
+  }
   return quote items {
-    use orm::{QueryPlan, Statement, OrmError, bind_value, UpdatePlan, Projection}
+    use orm::{QueryPlan, Statement, OrmError, bind_value, UpdatePlan, Projection, decoding_error}
+    use orm::Unchanged as ${unchanged_alias}
+    use orm::invalid_patch_value as ${invalid_patch_alias}
+    use orm::Row as ${row_alias}
+    use orm::Page as ${page_alias}
+    use orm::page_result as ${page_result_alias}
+    ${cursor_import}
     use orm::bind_value as ${binder_alias}
     use orm::Statement as ${statement_alias}
     ${relation_import}
     ${join_import}
     ${..reader_imports}
     ${..join_items}
+    ${key_struct}
     use std::database::Database
     @sql_schema(table: ${table_name}, source: ${info.name}, ddl: ${ddl})
     pub struct ${schema_type} {
       ${..schema_fields}
     }
     impl ${schema_type} {
+      ${..encoders}
       ${..schema_readers}
       ${..default_thunks}
+      pub fn __orm_empty_changes() -> ${changes} { return ${changes}.new(UpdatePlan.new()) }
+
       pub fn __orm_insert_statement(insert: ${insert_type}) -> Statement {
         let params: [Any] = []
         let slots = [${..insert_values}]
@@ -1148,11 +1807,11 @@ pub fn Model(info) -> Syntax<.Items> {
     }
     impl ${changes} {
       ${..setters}
-      pub fn apply(self, db: Database, key: ${key.type.ref}) -> Result<int, OrmError> {
-        return self.plan.apply(db, ${table}, ${key_column}, key)
+      pub fn apply(self, db: Database, key: ${key_type}) -> Result<int, OrmError> {
+        return self.plan.apply_keys(db, ${table}, [${..quoted_keys}], [${..key_values}])
       }
     }
-    @sql_query(schema: ${schema_name}, filter: "filter_plan", select: "project", reader: "read_", reader_type: ${info.name})
+    @sql_query(schema: ${schema_name}, filter: "filter_plan", select: "project", group_by: "group_plan", having: "having_plan", computed: "project_expr", scalar_reader: "__orm_scalar_", reader: "read_", reader_type: ${info.name})
     pub struct ${query} {
       pub plan: QueryPlan,
     }
@@ -1160,6 +1819,11 @@ pub fn Model(info) -> Syntax<.Items> {
       ${..query_methods}
       ${..comparisons}
       ${..join_methods}
+      ${cursor_method}
+      ${expression_methods}
+      pub fn seek_page(self, db: Database, size: int = 20, after: ${token_alias}? = nil) -> Result<${cursor_alias}<${info.ref}, ${token_alias}>, OrmError> {
+        return Projection.new(self.plan, |row| ${info.ref}::from_row(row)).seek_page(db, size, after)
+      }
       pub fn filter(self, predicate: fn(${schema_type}) -> bool) -> ${query} {
         let _ = self
         let _ = predicate
@@ -1193,6 +1857,18 @@ pub fn Model(info) -> Syntax<.Items> {
         if values.len() == 0 { return Result::Ok(nil) }
         return Result::Ok(values[0])
       }
+      pub fn first_row(self, db: Database) -> Result<${row_alias}<${info.ref}>?, OrmError> {
+        if self.plan.take == 0 { return Result::Ok(nil) }
+        let rows = self.limit(1).all(db)?
+        if rows.len() == 0 { return Result::Ok(nil) }
+        return Result::Ok(${row_alias}.new(rows[0]))
+      }
+      pub fn page(self, db: Database, number: int = 1, size: int = 20) -> Result<${page_alias}<${info.ref}>, OrmError> {
+        let plan = self.plan.for_page(number, size)?
+        let total = self.plan.count(db)?
+        let items = ${query}.new(plan).all(db)?
+        return Result::Ok(${page_result_alias}(items, number, size, total))
+      }
       /// Read the first record, preserving ordering and pagination; absence is recoverable.
       pub fn first_or_error(self, db: Database) -> Result<${info.ref}, OrmError> {
         let value = self.first(db)?
@@ -1205,10 +1881,17 @@ pub fn Model(info) -> Syntax<.Items> {
       pub fn delete(self, db: Database) -> Result<int, OrmError> { return self.plan.delete(db) }
     }
     impl ${info.ref} {
+      ${..join_proxies}
+      ${..encoders}
       ${..schema_readers}
-      ${..join_readers}
-      pub fn query() -> ${query} { return ${query}.new(QueryPlan.new(${table_name}, [${..column_names}])) }
-      pub fn changes() -> ${changes} { return ${changes}.new(UpdatePlan.new()) }
+      ${..scalar_methods}
+      pub fn key(self) -> ${key_type} { return ${key_expr} }
+      pub fn query() -> ${query} { return ${query}.new(QueryPlan.new(${table_name}, [${..column_names}], page_keys: [${..key_columns}], source: ${info.name})) }
+      pub fn changes(${..change_params}) -> ${changes} {
+        var ${patch_var} = ${schema_type}::__orm_empty_changes()
+        ${..change_assignments}
+        return ${patch_var}
+      }
       ${..relations}
       ${..upsert_methods}
       /// Insert with named inputs/defaults and decode the returned database row.
@@ -1236,12 +1919,16 @@ pub fn Model(info) -> Syntax<.Items> {
         for row in rows { values.push(${info.ref}::from_row(row)?) }
         return Result::Ok(values)
       }
-      pub fn find(db: Database, key: ${key.type.ref}) -> Result<${info.ref}?, OrmError> {
-        return ${query}.new(QueryPlan.new(${table_name}, [${..column_names}]).equal(${column_name(key)}, key)).first(db)
+      pub fn find(db: Database, key: ${key_type}) -> Result<${info.ref}?, OrmError> {
+        var plan = QueryPlan.new(${table_name}, [${..column_names}], page_keys: [${..key_columns}], source: ${info.name})
+        ${..key_filters}
+        return ${query}.new(plan).first(db)
       }
       /// Find a required record by primary key; absence returns NotFound(model name).
-      pub fn find_or_error(db: Database, key: ${key.type.ref}) -> Result<${info.ref}, OrmError> {
-        return ${query}.new(QueryPlan.new(${table_name}, [${..column_names}]).equal(${column_name(key)}, key)).first_or_error(db)
+      pub fn find_or_error(db: Database, key: ${key_type}) -> Result<${info.ref}, OrmError> {
+        let value = ${info.ref}::find(db, key)?
+        if value == nil { return Result::Err(OrmError::NotFound(${info.name})) }
+        return Result::Ok(value)
       }
       pub fn insert_statement(self) -> Statement {
         let params: [Any] = []
@@ -1283,10 +1970,290 @@ pub fn Model(info) -> Syntax<.Items> {
       }
       ${save}
       pub fn delete(self, db: Database) -> Result<int, OrmError> {
-        return Statement.new(${"DELETE FROM " + table + " WHERE " + key_column + " = ?"}, [self.${key.member}]).execute(db)
+        return Statement.new(${"DELETE FROM " + table + " WHERE " + key_where}, [${..self_keys}]).execute(db)
       }
       pub fn delete_all(db: Database) -> Result<int, OrmError> {
         return Statement.new(${"DELETE FROM " + table}, []).execute(db)
+      }
+    }
+  }
+}
+
+// Every join edge names a prior source and two real model fields.
+struct JoinOptions {
+  from: FieldRef? = nil,
+  key: FieldRef? = nil,
+  references: FieldRef? = nil,
+  keys: [FieldRef] = [],
+  reference_keys: [FieldRef] = [],
+}
+
+/// Derive a read-only result view with named, typed model sources.
+@derive_for(Query, scope: siblings, namespace: join, field_attrs: JoinOptions)
+pub fn Query(info) -> Syntax<.Items> {
+  if info.kind != "struct" { panic("orm: Query requires a struct") }
+  if info.fields.len() == 0 || info.fields.len() > 16 {
+    panic("orm: Query requires between one and sixteen sources")
+  }
+  let query = syntax.ident(info.name + "Query")
+  let plan_type = generated_local(info, "__orm_" + info.name + "_QueryPlan")
+  let error_type = generated_local(info, "__orm_" + info.name + "_OrmError")
+  let db_type = generated_local(info, "__orm_" + info.name + "_Database")
+  let statement_type = generated_local(info, "__orm_" + info.name + "_Statement")
+  let projection_type = generated_local(info, "__orm_" + info.name + "_Projection")
+  let row_type = generated_local(info, "__orm_" + info.name + "_Row")
+  let page_type = generated_local(info, "__orm_" + info.name + "_Page")
+  let cursor_type = generated_local(info, "__orm_" + info.name + "_CursorPage")
+  let token_type = generated_local(info, "__orm_" + info.name + "_QueryCursor")
+  let page_builder = generated_local(info, "__orm_" + info.name + "_page_result")
+  let sources = []
+  let models = []
+  let aliases: [str] = []
+  let tables: [str] = []
+  let joins = []
+  let columns = []
+  let page_keys = []
+  let decode_steps = []
+  let result_fields = []
+  let lambda_types = []
+  let on_types = []
+  let ordering = []
+  let order_names: [str] = []
+  let proxies = []
+  var ordinal = 0
+  for source in info.fields {
+    if source.has_default { panic("orm: query sources cannot have construction defaults") }
+    let logical_type = if source.type.is_optional { source.type.inner } else { source.type }
+    let model = resolve_visible_type(logical_type.name)
+    if model == nil || model.kind != "struct" { panic("orm: query source must be a visible model struct") }
+    let keys = model_primary_fields(model)
+    if keys.len() == 0 || keys.filter(|field| field.type.is_optional).len() > 0 {
+      panic("orm: query source requires nonoptional primary-key fields")
+    }
+    let key = keys[0]
+    let configured_table = model_option(model.decorators, "table", "")
+    let table = if configured_table == "" { model.name.lower() } else { configured_table }
+    identifier(table)
+    let alias = "orm_s{ordinal}"
+    if ordinal == 0 {
+      if source.type.is_optional { panic("orm: the first query source cannot be optional") }
+      if source.opts.from != nil || source.opts.key != nil || source.opts.references != nil || source.opts.keys.len() > 0 || source.opts.reference_keys.len() > 0 {
+        panic("orm: the first query source cannot declare a join")
+      }
+    } else {
+      let from = source.opts.from
+      let left_keys = source.opts.keys
+      let right_keys = source.opts.reference_keys
+      if source.opts.key != nil || source.opts.references != nil {
+        if left_keys.len() > 0 || right_keys.len() > 0 { panic("orm: do not combine scalar and composite join keys") }
+        if source.opts.key == nil || source.opts.references == nil { panic("orm: joined sources require both key and references") }
+        left_keys.push(source.opts.key)
+        right_keys.push(source.opts.references)
+      }
+      if from == nil || left_keys.len() == 0 || left_keys.len() != right_keys.len() {
+        panic("orm: joined sources require from and equally sized nonempty keys/reference_keys")
+      }
+      if from.owner.identity != info.identity { panic("orm: join source must belong to this query view") }
+      let prior = from.info.index
+      if prior >= ordinal { panic("orm: join source must precede its target") }
+      let predicates = []
+      let seen: [str] = []
+      for index in 0..left_keys.len() {
+        let left_key = left_keys[index]
+        let right_key = right_keys[index]
+        if left_key.owner.identity != models[prior].identity { panic("orm: join key belongs to a different source model") }
+        if right_key.owner.identity != model.identity { panic("orm: join references belongs to a different target model") }
+        let pair = left_key.name + ":" + right_key.name
+        if seen.contains(pair) { panic("orm: repeated composite join key pair") }
+        seen.push(pair)
+        if field_codec(left_key.info) != nil || field_codec(right_key.info) != nil {
+          panic("orm: join keys cannot use domain codecs")
+        }
+        if field_kind(left_key.info) != field_kind(right_key.info) {
+          panic("orm: joined fields require matching scalar types")
+        }
+        predicates.push(quote expr {
+          #{op: "eq", column: #{table: ${aliases[prior]}, column: ${reflected_column(left_key.info)}},
+            other: #{table: ${alias}, column: ${reflected_column(right_key.info)}}}
+        })
+      }
+      let mode = if source.type.is_optional { "left" } else { "inner" }
+      joins.push(quote expr {
+        #{kind: ${mode}, table: ${table}, alias: ${alias},
+          on: #{op: "and", terms: [${..predicates}]}}
+      })
+    }
+    models.push(model)
+    aliases.push(alias)
+    tables.push(table)
+    let proxy_prefix = "__orm_s{ordinal}_"
+    sources.push(quote expr {
+      #{source: ${logical_type.name}, alias: ${alias}, reader_type: ${info.name},
+        reader: ${proxy_prefix + "read_"}, encoder_prefix: ${proxy_prefix},
+        nullable: ${source.type.is_optional}, presence: ${key.name}}
+    })
+    for field in keys { page_keys.push(quote expr { #{table: ${alias}, column: ${reflected_column(field)}} }) }
+    lambda_types.push(source.type.ref)
+    on_types.push(if ordinal == info.fields.len() - 1 { logical_type.ref } else { source.type.ref })
+    let decoded = syntax.ident("__orm_source_{ordinal}")
+    let raw = syntax.ident("__orm_raw_{ordinal}")
+    let copies = []
+    var field_index = 0
+    var presence_alias = ""
+    for field in model.fields {
+      let reader = syntax.ident(proxy_prefix + "read_" + field.name)
+      let model_reader = syntax.ident("read_" + field.name)
+      proxies.push(quote member {
+        pub fn ${reader}(__orm_row: Any, __orm_column: str) {
+          return ${logical_type.ref}::${model_reader}(__orm_row, __orm_column)
+        }
+      })
+      if field_codec(field) != nil {
+        let encoder = syntax.ident(proxy_prefix + "__orm_encode_" + field.name)
+        let model_encoder = syntax.ident("__orm_encode_" + field.name)
+        proxies.push(quote member {
+          pub fn ${encoder}(__orm_value: Any) {
+            return ${logical_type.ref}::${model_encoder}(__orm_value)
+          }
+        })
+      }
+      let column = reflected_column(field)
+      let output_alias = "__orm_s{ordinal}_{field_index}"
+      columns.push(quote expr { #{table: ${alias}, column: ${column}, alias: ${output_alias}} })
+      copies.push(quote stmt { ${raw}[${column}] = row[${output_alias}] })
+      if field.name == key.name { presence_alias = output_alias }
+      if field_codec(field) == nil {
+        let order_name = "order_by_" + source.name + "_" + field.name
+        if order_names.contains(order_name) { panic("orm: generated query ordering method collision: " + order_name) }
+        order_names.push(order_name)
+        let order = syntax.ident(order_name)
+        ordering.push(quote member {
+          pub fn ${order}(self, descending: bool = false) -> ${query} {
+            return ${query}.new(self.plan.order(#{table: ${alias}, column: ${column}}, descending))
+          }
+        })
+      }
+      field_index += 1
+    }
+    if source.type.is_optional {
+      decode_steps.push(quote stmt {
+        var ${decoded}: ${source.type.ref} = nil
+        if row[${presence_alias}] != nil {
+          let ${raw}: Any = #{}
+          ${..copies}
+          ${decoded} = ${logical_type.ref}::from_row(${raw})?
+        }
+      })
+    } else {
+      decode_steps.push(quote stmt {
+        let ${raw}: Any = #{}
+        ${..copies}
+        let ${decoded} = ${logical_type.ref}::from_row(${raw})?
+      })
+    }
+    result_fields.push(quote member { ${source.member}: ${decoded}, })
+    ordinal += 1
+  }
+  let scalar_methods = scalar_readers(info.name, error_type)
+  let expression_methods = query_expression_methods(query, lambda_types, error_type, projection_type)
+  let on_methods = if joins.len() == 0 { quote member {} } else {
+    quote member {
+      /// Extend the last join; earlier optional sources remain optional.
+      pub fn on(self, predicate: fn(${..on_types}) -> bool) -> ${query} {
+        let _ = self
+        let _ = predicate
+        panic("orm: joined ON expression was not compiled")
+      }
+      pub fn on_plan(self, predicate: Any, bindings: [Any]) -> ${query} {
+        return ${query}.new(self.plan.on(predicate, bindings))
+      }
+    }
+  }
+  return quote items {
+    use std::database::Database as ${db_type}
+    use orm::QueryPlan as ${plan_type}
+    use orm::OrmError as ${error_type}
+    use orm::Statement as ${statement_type}
+    use orm::Projection as ${projection_type}
+    use orm::Row as ${row_type}
+    use orm::Page as ${page_type}
+    use orm::page_result as ${page_builder}
+    use orm::CursorPage as ${cursor_type}
+    use orm::QueryCursor as ${token_type}
+    use orm::{read_int, read_float, read_str, read_bool}
+
+    @sql_query(source: ${info.name}, sources: [${..sources}], filter: "filter_plan", select: "project", group_by: "group_plan", having: "having_plan", computed: "project_expr", scalar_reader: "__orm_scalar_", on: "on_plan")
+    pub struct ${query} { pub plan: ${plan_type}, }
+    impl ${query} {
+      ${..ordering}
+      ${on_methods}
+      ${expression_methods}
+      pub fn seek_page(self, db: ${db_type}, size: int = 20, after: ${token_type}? = nil) -> Result<${cursor_type}<${info.ref}, ${token_type}>, ${error_type}> {
+        return ${projection_type}.new(self.plan, |row| ${info.ref}::from_row(row)).seek_page(db, size, after)
+      }
+      pub fn filter(self, predicate: fn(${..lambda_types}) -> bool) -> ${query} {
+        let _ = self
+        let _ = predicate
+        panic("orm: query expression was not compiled")
+      }
+      pub fn select<R>(self, projection: fn(${..lambda_types}) -> R) -> ${projection_type}<R> {
+        let _ = self
+        let _ = projection
+        panic("orm: query projection was not compiled")
+      }
+      pub fn filter_plan(self, predicate: Any, bindings: [Any]) -> ${query} {
+        return ${query}.new(self.plan.filter(predicate, bindings))
+      }
+      pub fn project<R>(self, columns: [Any], decode: fn(Any) -> Result<R, ${error_type}>) -> ${projection_type}<R> {
+        return ${projection_type}.new(self.plan.project(columns), decode)
+      }
+      pub fn statement(self) -> ${statement_type} { return self.plan.select() }
+      pub fn try_statement(self) -> Result<${statement_type}, ${error_type}> { return self.plan.try_statement("select") }
+      pub fn limit(self, count: int) -> ${query} { return ${query}.new(self.plan.limit(count)) }
+      pub fn offset(self, count: int) -> ${query} { return ${query}.new(self.plan.offset(count)) }
+      pub fn count(self, db: ${db_type}) -> Result<int, ${error_type}> { return self.plan.count(db) }
+      pub fn exists(self, db: ${db_type}) -> Result<bool, ${error_type}> { return self.plan.exists(db) }
+      pub fn all(self, db: ${db_type}) -> Result<[${info.ref}], ${error_type}> {
+        let rows = self.try_statement()?.query(db)?
+        let result: [${info.ref}] = []
+        for row in rows { result.push(${info.ref}::from_row(row)?) }
+        return Result::Ok(result)
+      }
+      pub fn first(self, db: ${db_type}) -> Result<${info.ref}?, ${error_type}> {
+        if self.plan.take == 0 { return Result::Ok(nil) }
+        let rows = self.limit(1).all(db)?
+        if rows.len() == 0 { return Result::Ok(nil) }
+        return Result::Ok(rows[0])
+      }
+      pub fn first_row(self, db: ${db_type}) -> Result<${row_type}<${info.ref}>?, ${error_type}> {
+        let row = self.first(db)?
+        if row == nil { return Result::Ok(nil) }
+        return Result::Ok(${row_type}.new(row))
+      }
+      pub fn first_or_error(self, db: ${db_type}) -> Result<${info.ref}, ${error_type}> {
+        let row = self.first(db)?
+        if row == nil { return Result::Err(${error_type}::NotFound(${info.name})) }
+        return Result::Ok(row)
+      }
+      pub fn page(self, db: ${db_type}, number: int = 1, size: int = 20) -> Result<${page_type}<${info.ref}>, ${error_type}> {
+        let plan = self.plan.for_page(number, size)?
+        let total = self.plan.count(db)?
+        let items = ${query}.new(plan).all(db)?
+        return Result::Ok(${page_builder}(items, number, size, total))
+      }
+    }
+    impl ${info.ref} {
+      ${..proxies}
+      ${..scalar_methods}
+      pub fn query() -> ${query} {
+        return ${query}.new(${plan_type}.new(
+          ${tables[0]}, [${..columns}], alias: ${aliases[0]}, joins: [${..joins}],
+          page_keys: [${..page_keys}], source: ${info.name},
+        ))
+      }
+      pub fn from_row(row: Any) -> Result<${info.ref}, ${error_type}> {
+        ${..decode_steps}
+        return Result::Ok(${info.ref} { ${..result_fields} })
       }
     }
   }

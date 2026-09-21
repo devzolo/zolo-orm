@@ -1,0 +1,203 @@
+//! Opaque in-process continuation values and null-safe lexicographic predicates.
+use std::database::Database
+
+struct CursorBinding {
+  kind: str,
+  scalar: Any,
+  binary: [int],
+}
+
+/// A continuation belongs to one statement shape and the captured bound values.
+/// Keep it as a value in application code; it is not a signed external token.
+pub struct QueryCursor {
+  signature: str,
+  scope: [CursorBinding],
+  values: [Any],
+}
+
+pub struct CursorLayout {
+  pub ordering: [Any],
+  pub columns: [Any],
+  pub aliases: [str],
+}
+
+pub struct CursorPredicate {
+  pub predicate: Any,
+  pub params: [Any],
+}
+
+fn binding_snapshot(value: Any) -> Result<CursorBinding, str> {
+  if Database::is_bytes(value) {
+    return Result::Ok(CursorBinding.new("bytes", nil, Database::byte_array(value as bytes)))
+  }
+  let kind = if value == nil { "nil" } else if value is bool { "bool" }
+    else if value is int { "number" } else if value is float { "number" }
+    else if value is str { "str" } else { "" }
+  if kind == "" { return Result::Err("cursor scope requires scalar or binary database bindings") }
+  if value is float && value != value { return Result::Err("cursor scope cannot contain NaN") }
+  return Result::Ok(CursorBinding.new(kind, value, []))
+}
+
+fn same_binding(left: CursorBinding, right: CursorBinding) -> bool {
+  if left.kind != right.kind { return false }
+  if left.kind != "bytes" { return left.scalar == right.scalar }
+  if left.binary.len() != right.binary.len() { return false }
+  var index = 0
+  while index < left.binary.len() {
+    if left.binary[index] != right.binary[index] { return false }
+    index += 1
+  }
+  return true
+}
+
+fn column_parts(column: Any, default_table: str) -> Result<(str, str), str> {
+  if column is str { return Result::Ok((default_table, column)) }
+  let name = column.column as? str
+  if name == nil { return Result::Err("cursor ordering requires stored columns") }
+  let table = column.table as? str
+  return Result::Ok((table ?? default_table, name))
+}
+
+fn column_id(column: Any, default_table: str) -> Result<str, str> {
+  let parts = column_parts(column, default_table)?
+  return Result::Ok("{parts[0].len()}:{parts[0]}{parts[1].len()}:{parts[1]}")
+}
+
+pub fn contains_aggregate(column: Any) -> bool {
+  if column is str { return false }
+  let kind = column.expr as? str
+  if kind == nil { return false }
+  if ["count", "count_value", "sum", "avg", "min", "max"].contains(kind) { return true }
+  if kind == "add" || kind == "sub" || kind == "mul" || kind == "div" {
+    return contains_aggregate(column.left) || contains_aggregate(column.right)
+  }
+  return false
+}
+
+/// Append missing primary-key tiebreakers and private output aliases.
+pub fn cursor_layout(
+  ordering: [Any], keys: [Any], columns: [Any], default_table: str,
+) -> Result<CursorLayout, str> {
+  if keys.len() == 0 { return Result::Err("seek_page requires primary-key metadata") }
+  let result: [Any] = []
+  let identities: [str] = []
+  for term in ordering {
+    let identity = column_id(term.column, default_table)?
+    let descending = term.descending as? bool
+    if descending == nil { return Result::Err("cursor ordering direction must be boolean") }
+    var found = -1
+    var index = 0
+    while index < identities.len() {
+      if identities[index] == identity { found = index }
+      index += 1
+    }
+    if found >= 0 {
+      if result[found].descending != descending {
+        return Result::Err("cursor ordering repeats a column with conflicting directions")
+      }
+    } else {
+      identities.push(identity)
+      result.push(#{column: term.column, descending,
+        nulls: if descending { "last" } else { "first" }})
+    }
+  }
+  for key in keys {
+    let identity = column_id(key, default_table)?
+    if !identities.contains(identity) {
+      identities.push(identity)
+      result.push(#{column: key, descending: false, nulls: "first"})
+    }
+  }
+  // The structured SQL protocol deliberately bounds recursive predicate depth.
+  if result.len() > 24 { return Result::Err("seek_page supports at most 24 ordering columns including key tiebreakers") }
+  let selected = columns.map(|column| column)
+  let used: [str] = []
+  for column in columns {
+    if contains_aggregate(column) { return Result::Err("seek_page does not support aggregate projections") }
+    if column is str { used.push(column.lower()) } else {
+      let alias = column.alias as? str
+      let name = column.column as? str
+      if alias != nil { used.push(alias.lower()) } else if name != nil { used.push(name.lower()) }
+    }
+  }
+  let aliases: [str] = []
+  var index = 0
+  for term in result {
+    var output = "__orm_cursor_{index}"
+    while used.contains(output.lower()) { output += "_" }
+    used.push(output.lower())
+    aliases.push(output)
+    let parts = column_parts(term.column, default_table)?
+    selected.push(#{table: parts[0], column: parts[1], alias: output})
+    index += 1
+  }
+  return Result::Ok(CursorLayout.new(result, selected, aliases))
+}
+
+fn after_term(term: Any, value: Any) -> CursorPredicate {
+  let column = term.column
+  if value == nil {
+    if term.descending { return CursorPredicate.new(#{op: "false"}, []) }
+    return CursorPredicate.new(#{op: "not_null", column}, [])
+  }
+  if term.descending {
+    return CursorPredicate.new(#{op: "or", terms: [
+      #{op: "lt", column}, #{op: "is_null", column},
+    ]}, [value])
+  }
+  return CursorPredicate.new(#{op: "gt", column}, [value])
+}
+
+impl QueryCursor {
+  pub fn capture(signature: str, scope: [Any], row: Any, aliases: [str]) -> Result<QueryCursor, str> {
+    let bindings: [CursorBinding] = []
+    for value in scope { bindings.push(binding_snapshot(value)?) }
+    let values: [Any] = []
+    for alias in aliases {
+      let value: Any = row[alias]
+      if value != nil && !(value is int || value is float || value is str || value is bool) {
+        return Result::Err("cursor ordering supports only scalar columns")
+      }
+      if value is float && value != value { return Result::Err("cursor ordering cannot contain NaN") }
+      values.push(value)
+    }
+    return Result::Ok(QueryCursor.new(signature, bindings, values))
+  }
+
+  pub fn resume(self, signature: str, scope: [Any], ordering: [Any]) -> Result<CursorPredicate, str> {
+    if self.signature != signature || self.scope.len() != scope.len() || self.values.len() != ordering.len() {
+      return Result::Err("cursor belongs to a different query or ordering")
+    }
+    var index = 0
+    while index < scope.len() {
+      if !same_binding(self.scope[index], binding_snapshot(scope[index])?) {
+        return Result::Err("cursor belongs to different query bindings")
+      }
+      index += 1
+    }
+    // Build backwards, but prepend each level's bindings in SQL traversal order:
+    // after(current) OR (equal(current) AND after(the remaining columns)).
+    var suffix = CursorPredicate.new(#{op: "false"}, [])
+    index = ordering.len() - 1
+    while index >= 0 {
+      let term = ordering[index]
+      let value = self.values[index]
+      let greater = after_term(term, value)
+      if index == ordering.len() - 1 {
+        suffix = greater
+      } else {
+        let equal: Any = if value == nil { #{op: "is_null", column: term.column} }
+          else { #{op: "eq", column: term.column} }
+        let params: [Any] = []
+        for bound in greater.params { params.push(bound) }
+        if value != nil { params.push(value) }
+        for bound in suffix.params { params.push(bound) }
+        suffix = CursorPredicate.new(#{op: "or", terms: [
+          greater.predicate, #{op: "and", terms: [equal, suffix.predicate]},
+        ]}, params)
+      }
+      index -= 1
+    }
+    return Result::Ok(suffix)
+  }
+}

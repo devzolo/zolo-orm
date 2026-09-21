@@ -1,0 +1,149 @@
+//! Lossless built-in domains. Parse untrusted text before constructing models.
+pub use std::database::Blob
+
+fn digit(byte: int) -> bool { return byte >= 48 && byte <= 57 }
+
+fn digits(value: str) -> bool {
+  if value.len() == 0 { return false }
+  for byte in value.bytes() { if !digit(byte) { return false } }
+  return true
+}
+
+fn small_integer(value: str) -> int {
+  var number = 0
+  for byte in value.bytes() { number = number * 10 + byte - 48 }
+  return number
+}
+
+fn date_valid(value: str) -> bool {
+  if value.len() != 10 { return false }
+  let parts = value.bytes()
+  for byte in parts { if byte > 127 { return false } }
+  if parts[4] != 45 || parts[7] != 45 { return false }
+  let year_text = value.slice(0, 4)
+  let month_text = value.slice(5, 7)
+  let day_text = value.slice(8, 10)
+  if !digits(year_text) || !digits(month_text) || !digits(day_text) { return false }
+  let year = small_integer(year_text)
+  let month = small_integer(month_text)
+  let day = small_integer(day_text)
+  if year < 1 || month < 1 || month > 12 || day < 1 { return false }
+  let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+  let maximum = if month == 2 { if leap { 29 } else { 28 } }
+    else if month == 4 || month == 6 || month == 9 || month == 11 { 30 }
+    else { 31 }
+  return day <= maximum
+}
+
+/// Gregorian calendar date, stored as YYYY-MM-DD with no timezone.
+pub newtype Date(str)
+impl Date {
+  pub fn parse(value: str) -> Result<Date, str> {
+    if !date_valid(value) { return Result::Err("expected a valid YYYY-MM-DD date") }
+    return Result::Ok(Date.new(value))
+  }
+  pub fn to_string(self) -> str { return self.unwrap() }
+}
+
+/// UTC instant, canonicalized to YYYY-MM-DDTHH:MM:SS.NNNNNNNNNZ.
+/// Parsing accepts Z only and zero to nine fractional digits; no float is used.
+pub newtype Timestamp(str)
+impl Timestamp {
+  pub fn parse(value: str) -> Result<Timestamp, str> {
+    if value.len() < 20 || value.len() > 30 {
+      return Result::Err("expected a UTC timestamp with at most nine fractional digits")
+    }
+    let parts = value.bytes()
+    for byte in parts {
+      if byte > 127 { return Result::Err("expected an ASCII UTC timestamp") }
+    }
+    if (!date_valid(value.slice(0, 10)) || parts[10] != 84 || parts[13] != 58
+      || parts[16] != 58 || parts[parts.len() - 1] != 90) {
+      return Result::Err("expected YYYY-MM-DDTHH:MM:SS[.fraction]Z")
+    }
+    let hour = value.slice(11, 13)
+    let minute = value.slice(14, 16)
+    let second = value.slice(17, 19)
+    if (!digits(hour) || !digits(minute) || !digits(second)
+      || small_integer(hour) > 23 || small_integer(minute) > 59 || small_integer(second) > 59) {
+      return Result::Err("invalid UTC time")
+    }
+    var fraction = ""
+    if value.len() != 20 {
+      if parts[19] != 46 { return Result::Err("invalid timestamp fraction") }
+      fraction = value.slice(20, value.len() - 1)
+      if !digits(fraction) || fraction.len() > 9 {
+        return Result::Err("invalid timestamp fraction")
+      }
+    }
+    let canonical = (value.slice(0, 19) + "." + fraction
+      + "000000000".slice(fraction.len(), 9) + "Z")
+    return Result::Ok(Timestamp.new(canonical))
+  }
+  pub fn to_string(self) -> str { return self.unwrap() }
+}
+
+/// Arbitrary precision decimal text. No binary floating-point conversion.
+pub newtype ExactDecimal(str)
+impl ExactDecimal {
+  pub fn parse(value: str) -> Result<ExactDecimal, str> {
+    if value.len() == 0 { return Result::Err("expected decimal digits") }
+    let input = value.bytes()
+    let negative = input[0] == 45
+    let start = if negative { 1 } else { 0 }
+    let size = input.len()
+    var dot = size
+    var index = start
+    while index < size {
+      let byte = input[index]
+      if byte == 46 {
+        if dot != size { return Result::Err("expected one decimal point") }
+        dot = index
+      } else if !digit(byte) {
+        return Result::Err("expected plain decimal digits")
+      }
+      index = index + 1
+    }
+    if dot == start || (dot < size && dot + 1 == size) {
+      return Result::Err("expected digits around the decimal point")
+    }
+    var whole_start = start
+    while whole_start + 1 < dot && input[whole_start] == 48 { whole_start = whole_start + 1 }
+    var fraction_end = size
+    while fraction_end > dot + 1 && input[fraction_end - 1] == 48 {
+      fraction_end = fraction_end - 1
+    }
+    let whole = value.slice(whole_start, dot)
+    let fraction = if dot == size || fraction_end == dot + 1 { "" }
+      else { value.slice(dot + 1, fraction_end) }
+    let sign = if negative && (whole != "0" || fraction != "") { "-" } else { "" }
+    let suffix = if fraction == "" { "" } else { "." + fraction }
+    return Result::Ok(ExactDecimal.new(sign + whole + suffix))
+  }
+  pub fn to_string(self) -> str { return self.unwrap() }
+}
+
+pub struct DateCodec {}
+impl DateCodec {
+  pub fn encode(value: Date) -> str { return Date::parse(value.unwrap()).unwrap().unwrap() }
+  pub fn decode(value: str) -> Result<Date, str> { return Date::parse(value) }
+}
+
+pub struct TimestampCodec {}
+impl TimestampCodec {
+  pub fn encode(value: Timestamp) -> str { return Timestamp::parse(value.unwrap()).unwrap().unwrap() }
+  pub fn decode(value: str) -> Result<Timestamp, str> { return Timestamp::parse(value) }
+}
+
+pub struct DecimalCodec {}
+impl DecimalCodec {
+  pub fn encode(value: ExactDecimal) -> str { return ExactDecimal::parse(value.unwrap()).unwrap().unwrap() }
+  pub fn decode(value: str) -> Result<ExactDecimal, str> { return ExactDecimal::parse(value) }
+}
+
+/// Use storage: .Binary. Empty blobs and SQL NULL are distinct values.
+pub struct BlobCodec {}
+impl BlobCodec {
+  pub fn encode(value: Blob) -> bytes { return value.unwrap() }
+  pub fn decode(value: bytes) -> Result<Blob, str> { return Result::Ok(Blob.new(value)) }
+}

@@ -1,0 +1,2 @@
+//! A consumer can import the view without importing its underlying models.
+pub use composed_models::{Directory, Employed, seed_directory}
