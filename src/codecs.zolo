@@ -159,7 +159,7 @@ impl ExactDecimal {
     return Result::Ok(ExactDecimal::from_bigdecimal(left.divide(right, scale, rounding)?))
   }
   pub fn quantize(self, scale: int, rounding: Rounding) -> Result<ExactDecimal, str> {
-    return Result::Ok(ExactDecimal::from_bigdecimal(self.to_bigdecimal()?.quantize(scale, rounding)?))
+    return Result::Ok(ExactDecimal::from_bigdecimal((self.to_bigdecimal()?).quantize(scale, rounding)?))
   }
   pub fn compare(self, other: ExactDecimal) -> Result<int, str> {
     let left = self.to_bigdecimal()?

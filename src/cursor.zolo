@@ -28,7 +28,8 @@ pub struct CursorPredicate {
 
 fn binding_snapshot(value: Any) -> Result<CursorBinding, str> {
   if Database::is_bytes(value) {
-    return Result::Ok(CursorBinding.new("bytes", nil, Database::byte_array(value as bytes)))
+    let raw: bytes = value
+    return Result::Ok(CursorBinding.new("bytes", nil, Database::byte_array(raw)))
   }
   let kind = if value == nil { "nil" } else if value is bool { "bool" }
     else if value is int { "number" } else if value is float { "number" }
@@ -54,8 +55,8 @@ fn column_parts(column: Any, default_table: str) -> Result<(str, str), str> {
   if column is str { return Result::Ok((default_table, column)) }
   let name = column.column as? str
   if name == nil { return Result::Err("cursor ordering requires stored columns") }
-  let table = column.table as? str
-  return Result::Ok((table ?? default_table, name))
+  let table_name = column.table as? str
+  return Result::Ok((table_name ?? default_table, name))
 }
 
 fn column_id(column: Any, default_table: str) -> Result<str, str> {
@@ -125,18 +126,18 @@ pub fn cursor_layout(
   let used: [str] = []
   for column in columns {
     if contains_aggregate(column) { return Result::Err("seek_page does not support aggregate projections") }
-    if column is str { used.push(column.lower()) } else {
+    if column is str { used.push(column.to_lower()) } else {
       let alias = column.alias as? str
       let name = column.column as? str
-      if alias != nil { used.push(alias.lower()) } else if name != nil { used.push(name.lower()) }
+      if alias != nil { used.push(alias.to_lower()) } else if name != nil { used.push(name.to_lower()) }
     }
   }
   let aliases: [str] = []
   var index = 0
   for term in result {
     var output = "__orm_cursor_{index}"
-    while used.contains(output.lower()) { output += "_" }
-    used.push(output.lower())
+    while used.contains(output.to_lower()) { output += "_" }
+    used.push(output.to_lower())
     aliases.push(output)
     let parts = column_parts(term.column, default_table)?
     selected.push(#{table: parts[0], column: parts[1], alias: output})

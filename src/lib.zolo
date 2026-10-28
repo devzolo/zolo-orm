@@ -471,7 +471,7 @@ impl QueryPlan {
     return Result::Ok(Statement.new(sql, params, self.requires_decimal))
   }
   fn update(self, db: Database, assignments: [Any], values: [Any]) -> Result<MutationResult, OrmError> {
-    let affected = self.update_statement(assignments, values)?.execute(db)?
+    let affected = (self.update_statement(assignments, values)?).execute(db)?
     return Result::Ok(MutationResult.new(affected))
   }
 
@@ -598,7 +598,7 @@ impl Projection<T> {
       plan = plan.filter(continuation.predicate, continuation.params)
     }
     plan = plan.cursor_columns(layout.columns, layout.ordering).limit(size + 1)
-    let rows = plan.try_statement("select")?.query(db)?
+    let rows = (plan.try_statement("select")?).query(db)?
     let has_next = rows.len() > size
     let items: [T] = []
     var index = 0
@@ -622,7 +622,10 @@ impl Projection<T> {
 }
 
 pub fn read_bytes(value: Any, column: str, model_name: str = "") -> Result<bytes, OrmError> {
-  if Database::is_bytes(value) { return Result::Ok(value as bytes) }
+  if Database::is_bytes(value) {
+    let raw: bytes = value
+    return Result::Ok(raw)
+  }
   return Result::Err(decoding_error(model_name, column, "bytes"))
 }
 
@@ -2268,7 +2271,7 @@ pub fn Model(info) -> Syntax<.Items> {
         return Result::Ok(Statement.new(statement.text + " ON CONFLICT (" + target + ") " + action + ${returning}, statement.params, ${requires_decimal}))
       }
       pub fn __orm_upsert(db: Database, insert: ${insert_type}, update: ${changes}, target: str) -> Result<${info.ref}?, OrmError> {
-        let rows = ${schema_type}::__orm_upsert_statement(insert, update, target)?.query(db)?
+        let rows = (${schema_type}::__orm_upsert_statement(insert, update, target)?).query(db)?
         if rows.len() == 0 && update.plan.assignments.len() == 0 { return Result::Ok(nil) }
         if rows.len() != 1 { return Result::Err(OrmError::Decode("upsert expected one returned row")) }
         let value = ${info.ref}::from_row(rows[0])?
@@ -2328,7 +2331,7 @@ pub fn Model(info) -> Syntax<.Items> {
       pub fn locked(self, tx: ${transaction_type}, wait: ${lock_type} = .Wait) -> Result<[${info.ref}], OrmError> {
         tx.require_active()?
         let mode = match wait { .Wait => "update", .NoWait => "update_nowait", .SkipLocked => "update_skip_locked" }
-        let rows = self.plan.try_statement("select", mode)?.query(tx.db())?
+        let rows = (self.plan.try_statement("select", mode)?).query(tx.db())?
         let values: [${info.ref}] = []
         for row in rows { values.push(${info.ref}::from_row(row)?) }
         return Result::Ok(values)
@@ -2427,13 +2430,13 @@ pub fn Model(info) -> Syntax<.Items> {
         let checked = ${info.ref}::change(change.before, change.after).validate(validate)?
         let before = checked.before
         let current = checked.after
-        if before == nil && current == nil { return Result::Err(OrmError::UnsafeMutation("change requires a before or after value")) }
-        if current == nil {
+        if current is nil {
+          if before is nil { return Result::Err(OrmError::UnsafeMutation("change requires a before or after value")) }
           let affected = before.delete(tx.db())?
           MutationResult.new(affected).expect_one()?
           return Result::Ok(nil)
         }
-        if before == nil {
+        if before is nil {
           current.insert(tx.db())?
           return Result::Ok(${info.ref}::find_or_error(tx.db(), current.key())?)
         }
@@ -2795,7 +2798,7 @@ pub fn Query(info) -> Syntax<.Items> {
       pub fn count(self, db: ${db_type}) -> Result<int, ${error_type}> { return self.plan.count(db) }
       pub fn exists(self, db: ${db_type}) -> Result<bool, ${error_type}> { return self.plan.exists(db) }
       pub fn all(self, db: ${db_type}) -> Result<[${info.ref}], ${error_type}> {
-        let rows = self.try_statement()?.query(db)?
+        let rows = (self.try_statement()?).query(db)?
         let result: [${info.ref}] = []
         for row in rows { result.push(${info.ref}::from_row(row)?) }
         return Result::Ok(result)
@@ -3048,7 +3051,7 @@ pub struct CollectionDiff<T> {
   pub kept: [T],
   pub removed: [T],
 }
-pub fn diff_collection<T, K>(before: [T], after current: [T], key: fn(T) -> K) -> Result<CollectionDiff<T>, OrmError> {
+pub fn diff_collection<T, K: Eq>(before: [T], after current: [T], key: fn(T) -> K) -> Result<CollectionDiff<T>, OrmError> {
   let old_keys = before.map(key)
   let new_keys = current.map(key)
   for keys in [old_keys, new_keys] {
