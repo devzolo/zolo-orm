@@ -669,10 +669,10 @@ pub fn read_bool(value: Any, column: str, model_name: str = "") -> Result<bool, 
 struct ModelOptions {
   table: str = "",
   primary_key: [FieldRef] = [],
-  foreign_keys: {str: ForeignKeyOptions} = #{},
-  advanced_indexes: {str: IndexOptions} = #{},
-  indexes: {str: [FieldRef]} = #{},
-  unique_indexes: {str: [FieldRef]} = #{},
+  foreign_keys: Map<str, ForeignKeyOptions> = #{},
+  advanced_indexes: Map<str, IndexOptions> = #{},
+  indexes: Map<str, [FieldRef]> = #{},
+  unique_indexes: Map<str, [FieldRef]> = #{},
   /// Fields required by the generated scoped repository.
   scope: [FieldRef] = [],
 }
