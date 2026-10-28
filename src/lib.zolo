@@ -262,6 +262,13 @@ pub struct QueryPlan {
 }
 
 impl QueryPlan {
+  /// Root plan for generated models and query views. Derive output calls this
+  /// positionally: the named-call checker cannot see derive-local imports.
+  pub fn rooted(
+    table_name: str, columns: [Any], alias: str?, joins: [Any], page_keys: [Any], source: str, requires_decimal: bool,
+  ) -> QueryPlan {
+    return QueryPlan.new(table_name, columns, alias: alias, joins: joins, page_keys: page_keys, source: source, requires_decimal: requires_decimal)
+  }
   fn filter(self, predicate: Any, values: [Any]) -> QueryPlan {
     return QueryPlan.new(
       self.table,
@@ -2298,7 +2305,7 @@ pub fn Model(info) -> Syntax<.Items> {
         ${apply_patch}
       }
     }
-    @sql_query(schema: ${schema_name}, filter: "filter_plan", select: "project", group_by: "group_plan", having: "having_plan", computed: "project_expr", scalar_reader: "__orm_scalar_", reader: "read_", reader_type: ${info.name}, update: "update_plan", immutable: ${immutable_names}, numeric_reader: "__orm_nullable_read_")
+    @sql_query(schema: ${schema_name}, filter: "filter_plan", select: "project", group_by: "group_plan", having: "having_plan", computed: "project_expr", scalar_reader: "__orm_scalar_", reader: "read_", reader_type: ${info.name}, update: "update_plan", immutable: [${..immutable_names}], numeric_reader: "__orm_nullable_read_")
     pub struct ${query} {
       pub plan: QueryPlan,
     }
@@ -2328,9 +2335,9 @@ pub fn Model(info) -> Syntax<.Items> {
         return self.plan.update_statement(assignments, bindings)
       }
       /// Row locks require an active transaction and an explicit wait policy.
-      pub fn locked(self, tx: ${transaction_type}, wait: ${lock_type} = .Wait) -> Result<[${info.ref}], OrmError> {
+      pub fn locked(self, tx: ${transaction_type}, wait: ${lock_type} = ${lock_type}::Wait) -> Result<[${info.ref}], OrmError> {
         tx.require_active()?
-        let mode = match wait { .Wait => "update", .NoWait => "update_nowait", .SkipLocked => "update_skip_locked" }
+        let mode = match wait { ${lock_type}::Wait => "update", ${lock_type}::NoWait => "update_nowait", ${lock_type}::SkipLocked => "update_skip_locked" }
         let rows = (self.plan.try_statement("select", mode)?).query(tx.db())?
         let values: [${info.ref}] = []
         for row in rows { values.push(${info.ref}::from_row(row)?) }
@@ -2449,7 +2456,7 @@ pub fn Model(info) -> Syntax<.Items> {
         return ${changes_type}.new(before, current, fields)
       }
       pub fn key(self) -> ${key_type} { return ${key_expr} }
-      pub fn query() -> ${query} { return ${query}.new(QueryPlan.new(${table_name}, [${..column_names}], page_keys: [${..key_columns}], source: ${info.name}, requires_decimal: ${requires_decimal})) }
+      pub fn query() -> ${query} { return ${query}.new(QueryPlan::rooted(${table_name}, [${..column_names}], nil, [], [${..key_columns}], ${info.name}, ${requires_decimal})) }
       pub fn changes(${..change_params}) -> ${changes} {
         var ${patch_var} = ${schema_type}::__orm_empty_changes()
         ${..change_assignments}
@@ -2485,7 +2492,7 @@ pub fn Model(info) -> Syntax<.Items> {
         return Result::Ok(values)
       }
       pub fn find(db: Database, key: ${key_type}) -> Result<${info.ref}?, OrmError> {
-        var plan = QueryPlan.new(${table_name}, [${..column_names}], page_keys: [${..key_columns}], source: ${info.name}, requires_decimal: ${requires_decimal})
+        var plan = QueryPlan::rooted(${table_name}, [${..column_names}], nil, [], [${..key_columns}], ${info.name}, ${requires_decimal})
         ${..key_filters}
         return ${query}.new(plan).first(db)
       }
@@ -2830,9 +2837,9 @@ pub fn Query(info) -> Syntax<.Items> {
       ${..proxies}
       ${..scalar_methods}
       pub fn query() -> ${query} {
-        return ${query}.new(${plan_type}.new(
-          ${tables[0]}, [${..columns}], alias: ${aliases[0]}, joins: [${..joins}],
-          page_keys: [${..page_keys}], source: ${info.name}, requires_decimal: ${models.filter(|model| model.fields.filter(|field| numeric_decimal(field)).len() > 0).len() > 0},
+        return ${query}.new(${plan_type}::rooted(
+          ${tables[0]}, [${..columns}], ${aliases[0]}, [${..joins}],
+          [${..page_keys}], ${info.name}, ${models.filter(|model| model.fields.filter(|field| numeric_decimal(field)).len() > 0).len() > 0},
         ))
       }
       pub fn from_row(row: Any) -> Result<${info.ref}, ${error_type}> {
