@@ -1186,6 +1186,8 @@ fn scalar_readers(owner: str, error_type: Syntax<.Ident>) {
 
 @comptime
 fn query_expression_methods(query: Syntax<.Ident>, row_types, error_type: Syntax<.Ident>, projection: Syntax<.Ident>) -> Syntax<.Member> {
+  // `${hole}<R>` lexes as a markup tag; splice the type parameter instead.
+  let result = syntax.ident("R")
   return quote member {
     pub fn group_by<G>(self, key: fn(${..row_types}) -> G) -> ${query} {
       let _ = self
@@ -1203,7 +1205,7 @@ fn query_expression_methods(query: Syntax<.Ident>, row_types, error_type: Syntax
     pub fn having_plan(self, predicate: Any, bindings: [Any]) -> ${query} {
       return ${query}.new(self.plan.having(predicate, bindings))
     }
-    pub fn project_expr<R>(self, columns: [Any], bindings: [Any], decode: fn(Any) -> Result<R, ${error_type}>) -> ${projection}<R> {
+    pub fn project_expr<R>(self, columns: [Any], bindings: [Any], decode: fn(Any) -> Result<R, ${error_type}>) -> ${projection}<${result}> {
       return ${projection}.new(self.plan.project_expr(columns, bindings), decode)
     }
   }
@@ -1271,7 +1273,7 @@ pub fn Model(info) -> Syntax<.Items> {
     if codec != nil {
       let domain = if field.type.is_optional { field.type.inner } else { field.type }
       let structural = ["list", "map", "union"].contains(domain.kind)
-      let anonymous = domain.name.starts_with("(") || domain.name.starts_with("{") || domain.name.starts_with("fn(")
+      let anonymous = domain.name.starts_with("(") || domain.name.starts_with("\{") || domain.name.starts_with("fn(")
       if structural || anonymous || domain.name == "Any" || domain.name == "any" {
         panic("orm: codec domains require a scalar or named type; wrap collections in a newtype")
       }
@@ -2732,6 +2734,8 @@ pub fn Query(info) -> Syntax<.Items> {
   }
   let scalar_methods = scalar_readers(info.name, error_type)
   let expression_methods = query_expression_methods(query, lambda_types, error_type, projection_type)
+  // `${hole}<R>` lexes as a markup tag; splice the type parameter instead.
+  let result_param = syntax.ident("R")
   let on_methods = if joins.len() == 0 { quote member {} } else {
     quote member {
       /// Extend the last join; earlier optional sources remain optional.
@@ -2772,7 +2776,7 @@ pub fn Query(info) -> Syntax<.Items> {
         let _ = predicate
         panic("orm: query expression was not compiled")
       }
-      pub fn select<R>(self, projection: fn(${..lambda_types}) -> R) -> ${projection_type}<R> {
+      pub fn select<R>(self, projection: fn(${..lambda_types}) -> R) -> ${projection_type}<${result_param}> {
         let _ = self
         let _ = projection
         panic("orm: query projection was not compiled")
@@ -2780,7 +2784,7 @@ pub fn Query(info) -> Syntax<.Items> {
       pub fn filter_plan(self, predicate: Any, bindings: [Any]) -> ${query} {
         return ${query}.new(self.plan.filter(predicate, bindings))
       }
-      pub fn project<R>(self, columns: [Any], decode: fn(Any) -> Result<R, ${error_type}>) -> ${projection_type}<R> {
+      pub fn project<R>(self, columns: [Any], decode: fn(Any) -> Result<R, ${error_type}>) -> ${projection_type}<${result_param}> {
         return ${projection_type}.new(self.plan.project(columns), decode)
       }
       pub fn statement(self) -> ${statement_type} { return self.plan.select() }
