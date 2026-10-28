@@ -1428,12 +1428,18 @@ pub fn Model(info) -> Syntax<.Items> {
     let kind = field_kind(field)
     if !reader_kinds.contains(kind) { reader_kinds.push(kind) }
   }
-  let reader_imports = reader_kinds.map(
-    |kind| {
-      let reader = syntax.ident("read_" + kind)
-      return quote items { use orm::{${reader}} }
-    },
-  )
+  // Every `use` becomes a VM local, and a module chunk allows only 200, so the
+  // derive output imports everything it needs through one grouped `use`.
+  let orm_imports = reader_kinds.map(|kind| {
+    let reader = syntax.ident("read_" + kind)
+    return quote expr { ${reader} }
+  })
+  if info.fields.filter(|field| native_decimal_kind(field) == "decimal").len() > 0 {
+    orm_imports.push(quote expr { NativeDecimalCodec as ${native_decimal_alias} })
+  }
+  if info.fields.filter(|field| native_decimal_kind(field) == "bigdecimal").len() > 0 {
+    orm_imports.push(quote expr { BigDecimalCodec as ${native_bigdecimal_alias} })
+  }
   let encoders = info.fields.filter(|field| field_codec(field) != nil).map(|field| {
     let reference = runtime_codec_ref(field, info)
     let method = syntax.ident("__orm_encode_" + field.name)
@@ -1736,7 +1742,7 @@ pub fn Model(info) -> Syntax<.Items> {
             pub fn ${method}(self) -> ${joined_type} {
               return ${joined_type}.new(self.plan.join(
                 ${parent_table}, ${mode}, ${column_name(relation)}, ${reference_column}, [${..joined_columns}],
-                [${..joined_page_keys}], decimal: ${parent.fields.filter(|field| numeric_decimal(field)).len() > 0},
+                [${..joined_page_keys}], ${parent.fields.filter(|field| numeric_decimal(field)).len() > 0},
               ))
             }
           })
@@ -1828,10 +1834,8 @@ pub fn Model(info) -> Syntax<.Items> {
       }
     }
   }
-  let join_import = if join_items.len() > 0 { quote items { use orm::Joined } } else { quote items {} }
-  let relation_import = if relations.len() > 0 { quote items { use orm::Related } } else {
-    quote items {}
-  }
+  if join_items.len() > 0 { orm_imports.push(quote expr { Joined }) }
+  if relations.len() > 0 { orm_imports.push(quote expr { Related }) }
   let setters = nonkeys.map(
     |field| {
       let setter = syntax.ident("set_" + field.name)
@@ -2216,30 +2220,18 @@ pub fn Model(info) -> Syntax<.Items> {
       }
     }
   } else { quote member {} }
-  let cursor_import = quote items {
-    use orm::CursorPage as ${cursor_alias}
-    use orm::QueryCursor as ${token_alias}
-  }
   return quote items {
-    use orm::{QueryPlan, Statement, OrmError, bind_value, UpdatePlan, Projection, decoding_error, MutationResult, require_decimal_driver, checked_decimal_storage}
-    use orm::Transaction as ${transaction_type}
-    use orm::ValidationErrors as ${validation_type}
-    use orm::NativeDecimalCodec as ${native_decimal_alias}
-    use orm::BigDecimalCodec as ${native_bigdecimal_alias}
-    use orm::LockWait as ${lock_type}
-    use orm::Change as ${changes_type}
-    use orm::FieldChange as ${field_change_type}
-    use orm::Unchanged as ${unchanged_alias}
-    use orm::invalid_patch_value as ${invalid_patch_alias}
-    use orm::Row as ${row_alias}
-    use orm::Page as ${page_alias}
-    use orm::page_result as ${page_result_alias}
-    ${cursor_import}
-    use orm::bind_value as ${binder_alias}
-    use orm::Statement as ${statement_alias}
-    ${relation_import}
-    ${join_import}
-    ${..reader_imports}
+    use orm::{
+      QueryPlan, Statement, OrmError, bind_value, UpdatePlan, Projection, decoding_error, MutationResult,
+      require_decimal_driver, checked_decimal_storage,
+      Transaction as ${transaction_type}, ValidationErrors as ${validation_type}, LockWait as ${lock_type},
+      Change as ${changes_type}, FieldChange as ${field_change_type},
+      Unchanged as ${unchanged_alias}, invalid_patch_value as ${invalid_patch_alias},
+      Row as ${row_alias}, Page as ${page_alias}, page_result as ${page_result_alias},
+      CursorPage as ${cursor_alias}, QueryCursor as ${token_alias},
+      bind_value as ${binder_alias}, Statement as ${statement_alias},
+      ${..orm_imports},
+    }
     ${..join_items}
     ${key_struct}
     ${scope_items}
@@ -2762,16 +2754,11 @@ pub fn Query(info) -> Syntax<.Items> {
   }
   return quote items {
     use std::database::Database as ${db_type}
-    use orm::QueryPlan as ${plan_type}
-    use orm::OrmError as ${error_type}
-    use orm::Statement as ${statement_type}
-    use orm::Projection as ${projection_type}
-    use orm::Row as ${row_type}
-    use orm::Page as ${page_type}
-    use orm::page_result as ${page_builder}
-    use orm::CursorPage as ${cursor_type}
-    use orm::QueryCursor as ${token_type}
-    use orm::{read_int, read_float, read_str, read_bool}
+    use orm::{
+      QueryPlan as ${plan_type}, OrmError as ${error_type}, Statement as ${statement_type},
+      Projection as ${projection_type}, Row as ${row_type}, Page as ${page_type}, page_result as ${page_builder},
+      CursorPage as ${cursor_type}, QueryCursor as ${token_type}, read_int, read_float, read_str, read_bool,
+    }
 
     @sql_query(source: ${info.name}, sources: [${..sources}], filter: "filter_plan", select: "project", group_by: "group_plan", having: "having_plan", computed: "project_expr", scalar_reader: "__orm_scalar_", on: "on_plan")
     pub struct ${query} { pub plan: ${plan_type}, }
