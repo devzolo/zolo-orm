@@ -160,9 +160,9 @@ fn after_term(term: Any, value: Any) -> CursorPredicate {
 }
 
 impl QueryCursor {
-  pub fn capture(signature: str, scope: [Any], row: Any, aliases: [str]) -> Result<QueryCursor, str> {
+  pub fn capture(signature: str, scope_values: [Any], row: Any, aliases: [str]) -> Result<QueryCursor, str> {
     let bindings: [CursorBinding] = []
-    for value in scope { bindings.push(binding_snapshot(value)?) }
+    for value in scope_values { bindings.push(binding_snapshot(value)?) }
     let values: [Any] = []
     for alias in aliases {
       let value: Any = row[alias]
@@ -175,13 +175,13 @@ impl QueryCursor {
     return Result::Ok(QueryCursor.new(signature, bindings, values))
   }
 
-  pub fn resume(self, signature: str, scope: [Any], ordering: [Any]) -> Result<CursorPredicate, str> {
-    if self.signature != signature || self.scope.len() != scope.len() || self.values.len() != ordering.len() {
+  pub fn resume(self, signature: str, scope_values: [Any], ordering: [Any]) -> Result<CursorPredicate, str> {
+    if self.signature != signature || self.scope.len() != scope_values.len() || self.values.len() != ordering.len() {
       return Result::Err("cursor belongs to a different query or ordering")
     }
     var index = 0
-    while index < scope.len() {
-      if !same_binding(self.scope[index], binding_snapshot(scope[index])?) {
+    while index < scope_values.len() {
+      if !same_binding(self.scope[index], binding_snapshot(scope_values[index])?) {
         return Result::Err("cursor belongs to different query bindings")
       }
       index += 1

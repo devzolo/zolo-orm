@@ -365,7 +365,7 @@ impl QueryPlan {
   }
 
   /// Keyset pagination uses one exclusive bound and a single lookahead row.
-  fn for_cursor(self, column: str, size: int, after: Any, descending: bool) -> Result<QueryPlan, OrmError> {
+  fn for_cursor(self, column: str, size: int, bound: Any, descending: bool) -> Result<QueryPlan, OrmError> {
     if self.aggregated() { return Result::Err(OrmError::InvalidPagination("cursor_page does not support grouped or aggregate queries")) }
     if size < 1 || size == 9223372036854775807 {
       return Result::Err(OrmError::InvalidPagination("cursor size must be positive and leave room for lookahead"))
@@ -374,9 +374,9 @@ impl QueryPlan {
       return Result::Err(OrmError::InvalidPagination("cursor_page owns ordering and cannot be combined with limit, offset or joins"))
     }
     var query = self
-    if after != nil {
+    if bound != nil {
       let op = if descending { "lt" } else { "gt" }
-      query = query.filter(#{op, column}, [after])
+      query = query.filter(#{op, column}, [bound])
     }
     return Result::Ok(query.order(column, descending).limit(size + 1))
   }
@@ -577,7 +577,7 @@ impl Projection<T> {
   fn count(self, db: Database) -> Result<int, OrmError> { return self.plan.count(db) }
   fn exists(self, db: Database) -> Result<bool, OrmError> { return self.plan.exists(db) }
   /// Continue this projection using typed ordering and all source key tiebreakers.
-  fn seek_page(self, db: Database, size: int = 20, after: QueryCursor? = nil) -> Result<CursorPage<T, QueryCursor>, OrmError> {
+  fn seek_page(self, db: Database, size: int = 20, after cursor: QueryCursor? = nil) -> Result<CursorPage<T, QueryCursor>, OrmError> {
     if size < 1 || size == 9223372036854775807 {
       return Result::Err(OrmError::InvalidPagination("cursor size must be positive and leave room for lookahead"))
     }
@@ -590,9 +590,9 @@ impl Projection<T> {
     let layout = cursor_layout(self.plan.ordering, self.plan.page_keys, self.plan.columns, self.plan.alias ?? self.plan.table)
       .map_err(|error| OrmError::InvalidPagination(error))?
     var plan = self.plan.cursor_columns(self.plan.columns, layout.ordering)
-    let scope = plan.try_statement("select")?
-    if after != nil {
-      let continuation = after.resume(scope.text, scope.params, layout.ordering)
+    let signature = plan.try_statement("select")?
+    if cursor != nil {
+      let continuation = cursor.resume(signature.text, signature.params, layout.ordering)
         .map_err(|error| OrmError::InvalidPagination(error))?
       plan = plan.filter(continuation.predicate, continuation.params)
     }
@@ -607,7 +607,7 @@ impl Projection<T> {
     }
     var next: QueryCursor? = nil
     if has_next {
-      next = QueryCursor::capture(scope.text, scope.params, rows[size - 1], layout.aliases)
+      next = QueryCursor::capture(signature.text, signature.params, rows[size - 1], layout.aliases)
         .map_err(|error| OrmError::InvalidPagination(error))?
     }
     return Result::Ok(CursorPage.new(items, next, has_next))
@@ -1746,8 +1746,8 @@ pub fn Model(info) -> Syntax<.Items> {
                 ${read_right}
                 return Result::Ok(Joined.new(left, right))
               }
-              pub fn seek_page(self, db: Database, size: int = 20, after: ${token_alias}? = nil) -> Result<${cursor_alias}<Joined<${info.ref}, ${right_type}>, ${token_alias}>, OrmError> {
-                return Projection.new(self.plan, |row| ${joined_type}::decode_row(row)).seek_page(db, size, after)
+              pub fn seek_page(self, db: Database, size: int = 20, after cursor: ${token_alias}? = nil) -> Result<${cursor_alias}<Joined<${info.ref}, ${right_type}>, ${token_alias}>, OrmError> {
+                return Projection.new(self.plan, |row| ${joined_type}::decode_row(row)).seek_page(db, size, cursor)
               }
               pub fn on(self, predicate: fn(${schema_type}, ${parent_type}) -> bool) -> ${joined_type} {
                 let _ = self
@@ -2018,10 +2018,10 @@ pub fn Model(info) -> Syntax<.Items> {
   let field_change_type = generated_local(info, "__orm_" + info.name + "_FieldChange")
   let field_changes = info.fields.map(|field| {
     let old = query_encoded_value(field, schema_type, quote expr { before.${field.member} })
-    let new = query_encoded_value(field, schema_type, quote expr { after.${field.member} })
+    let new = query_encoded_value(field, schema_type, quote expr { current.${field.member} })
     return quote stmt {
       let old_value: Any = if before == nil { nil } else { ${old} }
-      let new_value: Any = if after == nil { nil } else { ${new} }
+      let new_value: Any = if current == nil { nil } else { ${new} }
       if old_value != new_value {
         fields.push(${field_change_type}.new(${field.name},
           if ${field.opts.redact} { nil } else { old_value },
@@ -2030,17 +2030,17 @@ pub fn Model(info) -> Syntax<.Items> {
     }
   })
   let change_key_checks = info.fields.filter(|field| immutable_names.contains(field.name)).map(|field| quote stmt {
-    if before.${field.member} != after.${field.member} {
+    if before.${field.member} != current.${field.member} {
       return Result::Err(OrmError::UnsafeMutation(${"changes cannot replace key, scope or revision: " + field.name}))
     }
   })
   let change_update = if nonkeys.len() == 0 && revision == nil {
-    quote stmt { return Result::Ok(after) }
+    quote stmt { return Result::Ok(current) }
   } else {
     quote stmt {
-      let affected = after.update(tx.db())?
+      let affected = current.update(tx.db())?
       MutationResult.new(affected).expect_one()?
-      return Result::Ok(${info.ref}::find_or_error(tx.db(), after.key())?)
+      return Result::Ok(${info.ref}::find_or_error(tx.db(), current.key())?)
     }
   }
   let transaction_type = generated_local(info, "__orm_" + info.name + "_Transaction")
@@ -2142,8 +2142,8 @@ pub fn Model(info) -> Syntax<.Items> {
         pub fn page(self, number: int = 1, size: int = 20) -> Result<${page_alias}<${info.ref}>, OrmError> {
           return self.query().page(self.connection, number, size)
         }
-        pub fn seek_page(self, size: int = 20, after: ${token_alias}? = nil) -> Result<${cursor_alias}<${info.ref}, ${token_alias}>, OrmError> {
-          return self.query().seek_page(self.connection, size, after)
+        pub fn seek_page(self, size: int = 20, after cursor: ${token_alias}? = nil) -> Result<${cursor_alias}<${info.ref}, ${token_alias}>, OrmError> {
+          return self.query().seek_page(self.connection, size, cursor)
         }
         pub fn count(self) -> Result<int, OrmError> { return self.query().count(self.connection) }
         pub fn insert(self, value: ${info.ref}) -> Result<int, OrmError> {
@@ -2185,9 +2185,9 @@ pub fn Model(info) -> Syntax<.Items> {
   let cursor_method = if keys.len() == 1 && (field_kind(key) == "int" || field_kind(key) == "str") {
     quote member {
       pub fn cursor_page(
-        self, db: Database, size: int = 20, after: ${key.type.ref}? = nil, descending: bool = false,
+        self, db: Database, size: int = 20, after cursor: ${key.type.ref}? = nil, descending: bool = false,
       ) -> Result<${cursor_alias}<${info.ref}, ${key.type.ref}>, OrmError> {
-        let plan = self.plan.for_cursor(${column_name(key)}, size, after, descending)?
+        let plan = self.plan.for_cursor(${column_name(key)}, size, cursor, descending)?
         let statement = plan.try_statement("select")?
         let rows = statement.query(db)?
         let has_next = rows.len() > size
@@ -2348,8 +2348,8 @@ pub fn Model(info) -> Syntax<.Items> {
       ${..join_methods}
       ${cursor_method}
       ${expression_methods}
-      pub fn seek_page(self, db: Database, size: int = 20, after: ${token_alias}? = nil) -> Result<${cursor_alias}<${info.ref}, ${token_alias}>, OrmError> {
-        return Projection.new(self.plan, |row| ${info.ref}::from_row(row)).seek_page(db, size, after)
+      pub fn seek_page(self, db: Database, size: int = 20, after cursor: ${token_alias}? = nil) -> Result<${cursor_alias}<${info.ref}, ${token_alias}>, OrmError> {
+        return Projection.new(self.plan, |row| ${info.ref}::from_row(row)).seek_page(db, size, cursor)
       }
       pub fn filter(self, predicate: fn(${schema_type}) -> bool) -> ${query} {
         let _ = self
@@ -2423,24 +2423,24 @@ pub fn Model(info) -> Syntax<.Items> {
         tx.require_active()?
         let checked = ${info.ref}::change(change.before, change.after).validate(validate)?
         let before = checked.before
-        let after = checked.after
-        if before == nil && after == nil { return Result::Err(OrmError::UnsafeMutation("change requires a before or after value")) }
-        if after == nil {
+        let current = checked.after
+        if before == nil && current == nil { return Result::Err(OrmError::UnsafeMutation("change requires a before or after value")) }
+        if current == nil {
           let affected = before.delete(tx.db())?
           MutationResult.new(affected).expect_one()?
           return Result::Ok(nil)
         }
         if before == nil {
-          after.insert(tx.db())?
-          return Result::Ok(${info.ref}::find_or_error(tx.db(), after.key())?)
+          current.insert(tx.db())?
+          return Result::Ok(${info.ref}::find_or_error(tx.db(), current.key())?)
         }
         ${..change_key_checks}
         ${change_update}
       }
-      pub fn change(before: ${info.ref}?, after: ${info.ref}?) -> ${changes_type}<${info.ref}> {
+      pub fn change(before: ${info.ref}?, after current: ${info.ref}?) -> ${changes_type}<${info.ref}> {
         let fields: [${field_change_type}] = []
         ${..field_changes}
-        return ${changes_type}.new(before, after, fields)
+        return ${changes_type}.new(before, current, fields)
       }
       pub fn key(self) -> ${key_type} { return ${key_expr} }
       pub fn query() -> ${query} { return ${query}.new(QueryPlan.new(${table_name}, [${..column_names}], page_keys: [${..key_columns}], source: ${info.name}, requires_decimal: ${requires_decimal})) }
@@ -2764,8 +2764,8 @@ pub fn Query(info) -> Syntax<.Items> {
       ${..ordering}
       ${on_methods}
       ${expression_methods}
-      pub fn seek_page(self, db: ${db_type}, size: int = 20, after: ${token_type}? = nil) -> Result<${cursor_type}<${info.ref}, ${token_type}>, ${error_type}> {
-        return ${projection_type}.new(self.plan, |row| ${info.ref}::from_row(row)).seek_page(db, size, after)
+      pub fn seek_page(self, db: ${db_type}, size: int = 20, after cursor: ${token_type}? = nil) -> Result<${cursor_type}<${info.ref}, ${token_type}>, ${error_type}> {
+        return ${projection_type}.new(self.plan, |row| ${info.ref}::from_row(row)).seek_page(db, size, cursor)
       }
       pub fn filter(self, predicate: fn(${..lambda_types}) -> bool) -> ${query} {
         let _ = self

@@ -207,9 +207,9 @@ pub struct CollectionDiff<T> {
   pub kept: [T],
   pub removed: [T],
 }
-pub fn diff_collection<T, K>(before: [T], after: [T], key: fn(T) -> K) -> Result<CollectionDiff<T>, OrmError> {
+pub fn diff_collection<T, K>(before: [T], after current: [T], key: fn(T) -> K) -> Result<CollectionDiff<T>, OrmError> {
   let old_keys = before.map(key)
-  let new_keys = after.map(key)
+  let new_keys = current.map(key)
   for keys in [old_keys, new_keys] {
     for index in 0..keys.len() {
       var other = index + 1
@@ -219,8 +219,8 @@ pub fn diff_collection<T, K>(before: [T], after: [T], key: fn(T) -> K) -> Result
       }
     }
   }
-  let added = after.filter(|item| !old_keys.contains(key(item)))
-  let kept = after.filter(|item| old_keys.contains(key(item)))
+  let added = current.filter(|item| !old_keys.contains(key(item)))
+  let kept = current.filter(|item| old_keys.contains(key(item)))
   let removed = before.filter(|item| !new_keys.contains(key(item)))
   return Result::Ok(CollectionDiff.new(added, kept, removed))
 }
