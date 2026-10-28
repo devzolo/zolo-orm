@@ -1,0 +1,8 @@
+use orm::Model
+@derive(Model)
+struct NativeAmount {
+  @model(primary_key: true)
+  id: int,
+  amount: decimal,
+}
+let wrong = NativeAmount::changes(amount: 1.25)

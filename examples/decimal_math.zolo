@@ -1,0 +1,84 @@
+//! Native decimal arithmetic and ORM mapping, without a separate ORM numeric engine.
+use orm::{ExactDecimal, NativeDecimalCodec, BigDecimalCodec, Sql}
+use std::decimal::Rounding
+use std::database::Database
+use native_decimal_models::{NumericInvoice, NumericBalance, DecimalTextRow, InvoiceReport}
+
+fn exercise_decimal_math() {
+  assert(0.1d + 0.2d == 0.3d)
+  assert(9007199254740993.01d + 0.02d == 9007199254740993.03d)
+  assert(2d - 3.25d == -1.25d)
+  assert(-2bd * -3.25bd == 6.5bd)
+  assert((1d).divide(8d, scale: 2, rounding: .HalfEven).unwrap() == 0.12d)
+  assert((1bd).divide(8bd, scale: 2, rounding: .HalfUp).unwrap() == 0.13bd)
+  assert((3.5d).quantize(0, .HalfEven).unwrap() == 4d)
+  assert((2.5bd).quantize(0, .HalfEven).unwrap() == 2bd)
+  assert((-1.01d).quantize(0, .Floor).unwrap() == -2d)
+  assert((-1.01bd).quantize(0, .Ceiling).unwrap() == -1bd)
+  assert((0d).divide(-3d, 2, .AwayFromZero).unwrap() == 0d)
+  assert((1bd).divide(0bd, 2, .HalfEven).is_err())
+  assert(10d > 2d && -10bd < -2bd)
+  assert((0.001bd * 0.001bd).to_plain_string() == "0.000001")
+  assert(decimal::parse("1.25").unwrap() == 1.25d)
+  assert(bigdecimal::parse("123456789012345678901234567890.01").unwrap() == 123456789012345678901234567890.01bd)
+  assert(decimal::parse("123456789012345678901234567890.01").is_err())
+  assert(decimal::parse("0.00000000000000000000000000001").is_err())
+  assert(bigdecimal::parse("NaN").is_err())
+  assert(NativeDecimalCodec::decode("not a number").is_err())
+  assert(BigDecimalCodec::encode(0.000000001bd) == "0.000000001")
+
+  // Existing consumers retain their text wrapper and gain explicit conversions.
+  let legacy = ExactDecimal::parse("0.1").unwrap()
+  assert(legacy.to_decimal().unwrap() == 0.1d)
+  assert(legacy.add(ExactDecimal::from_bigdecimal(0.2bd)).unwrap().to_bigdecimal().unwrap() == 0.3bd)
+  assert(ExactDecimal::from_decimal(1.20d).to_string() == "1.2")
+}
+
+fn exercise_decimal_models() {
+  assert(NumericInvoice::schema_sql().contains("DECIMAL(28, 6)"))
+  assert(NumericBalance::schema_sql().contains("DECIMAL(60, 8)"))
+  // Query operand precision is independent of the destination column scale.
+  let plan = NumericInvoice::query().filter(|row| row.amount > 0.0000005d)
+    .select(|row| row.amount * 0.000000075d).try_statement().unwrap()
+  assert(plan.params[0] == "0.000000075")
+  assert(plan.params[1] == "0.0000005")
+  assert(NumericInvoice::query().where_amount_gt(0.0000005d).try_statement().unwrap().params[0] == "0.0000005")
+  let wide = NumericBalance::query().filter(|row| row.amount > 1bd).try_statement().unwrap()
+  assert(wide.params[0] == "1")
+  let grouped = NumericInvoice::query().group_by(|row| row.amount)
+    .select(|row| (row.amount, Sql::count())).try_statement().unwrap()
+  assert(grouped.text.contains("GROUP BY"))
+  let report = InvoiceReport::query().order_by_invoice_amount()
+    .select(|invoice| invoice.amount * 0.000000075d).try_statement().unwrap()
+  assert(report.text.contains("ORDER BY") && report.params[0] == "0.000000075")
+
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  // SQLite cannot satisfy NUMERIC's exact arithmetic contract.
+  assert(NumericInvoice::create_table(db).is_err())
+  assert(NumericInvoice::query().all(db).is_err())
+  // Explicit Text storage still decodes to the native language values.
+  DecimalTextRow::create_table(db).unwrap()
+  let first = DecimalTextRow::create(db, id: 1, balance: nil).unwrap()
+  assert(first.amount == 0.1d && first.balance == nil)
+  let huge = 123456789012345678901234567890.12345678bd
+  DecimalTextRow::create(db, id: 2, amount: 19.99d, balance: huge).unwrap()
+  let stored = DecimalTextRow::find_or_error(db, 2).unwrap()
+  assert(stored.amount == 19.99d && stored.balance == huge)
+  let amounts: [decimal] = DecimalTextRow::query().select(|row| row.amount).all(db).unwrap()
+  assert(amounts.len() == 2)
+  DecimalTextRow::changes(amount: 20.01d, balance: nil).apply(db, 2).unwrap()
+  assert(DecimalTextRow::find_or_error(db, 2).unwrap().balance == nil)
+  db.execute("UPDATE decimal_text_rows SET amount = ? WHERE id = ?", ["999999999999999999999999999999999", 2]).unwrap()
+  assert(DecimalTextRow::find_or_error(db, 2).is_err())
+}
+
+@test
+fn native_decimal_arithmetic() { exercise_decimal_math() }
+
+@test
+fn native_decimal_persistence() { exercise_decimal_models() }
+
+exercise_decimal_math()
+exercise_decimal_models()
+print("orm exact decimal arithmetic: ok")

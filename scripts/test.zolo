@@ -32,7 +32,7 @@ run_step(sh"{zolo} check src/lib.zolo".cwd(root), "check src/lib.zolo")
 run_step(sh"{zolo} install".cwd(examples), "install examples")
 let runnable = [
     "basic", "upsert", "relationships", "integration", "dx", "dx_imports",
-    "expressions", "hygiene", "required_reads", "error_handling", "schema_writes", "foreign_keys", "relations", "query_plan", "joins", "nullable_projections", "typed_relations", "typed_indexes", "pagination", "named_patches", "domain_codecs", "composed_queries", "aggregates", "advanced_cursors", "builtin_codecs", "advanced_schemas",
+    "expressions", "hygiene", "required_reads", "error_handling", "schema_writes", "foreign_keys", "relations", "query_plan", "joins", "nullable_projections", "typed_relations", "typed_indexes", "pagination", "named_patches", "domain_codecs", "composed_queries", "aggregates", "advanced_cursors", "builtin_codecs", "advanced_schemas", "erp_concurrency", "erp_workflows", "decimal_math",
 ]
 for example in runnable {
     run_step(sh"{zolo} run {example}.zolo --no-cache".cwd(examples), "run {example}.zolo")
@@ -54,10 +54,24 @@ run_step(sh"{zolo} test aggregates.zolo".cwd(examples), "test aggregates.zolo")
 run_step(sh"{zolo} test advanced_cursors.zolo".cwd(examples), "test advanced_cursors.zolo")
 run_step(sh"{zolo} test builtin_codecs.zolo".cwd(examples), "test builtin_codecs.zolo")
 run_step(sh"{zolo} test advanced_schemas.zolo".cwd(examples), "test advanced_schemas.zolo")
+run_step(sh"{zolo} test erp_concurrency.zolo".cwd(examples), "test erp_concurrency.zolo")
+run_step(sh"{zolo} test erp_workflows.zolo".cwd(examples), "test erp_workflows.zolo")
+run_step(sh"{zolo} test decimal_math.zolo".cwd(examples), "test decimal_math.zolo")
 run_step(sh"{zolo} test nullable_projections.zolo".cwd(examples), "test nullable_projections.zolo")
 
 run_step(sh"{zolo} install".cwd(tests), "install tests")
 let cases = [
+    CompileFail { file: "native_decimal_precision.zolo", patterns: ["use bigdecimal"] },
+    CompileFail { file: "native_decimal_float_storage.zolo", patterns: ["never use floating-point storage"] },
+    CompileFail { file: "native_decimal_wrong_patch.zolo", patterns: ["TE111", "incompatible"] },
+    CompileFail { file: "native_decimal_text_arithmetic.zolo", patterns: ["codec", "numeric"] },
+    CompileFail { file: "erp_validator_return.zolo", patterns: ["nil", "type mismatch"] },
+    CompileFail { file: "erp_update_key.zolo", patterns: ["immutable"] },
+    CompileFail { file: "erp_update_scope.zolo", patterns: ["immutable"] },
+    CompileFail { file: "erp_update_revision.zolo", patterns: ["immutable"] },
+    CompileFail { file: "erp_revision_type.zolo", patterns: ["revision requires a nonoptional integer"] },
+    CompileFail { file: "erp_decimal_scale.zolo", patterns: ["decimal precision must be"] },
+    CompileFail { file: "erp_scope_wrong_owner.zolo", patterns: ["scope field must belong"] },
     CompileFail { file: "composite_key_subset_foreign.zolo", patterns: ["complete primary, column UNIQUE or unique_indexes"] },
     CompileFail { file: "composite_key_wrong_owner.zolo", patterns: ["primary key field must belong"] },
     CompileFail { file: "composite_key_patch.zolo", patterns: ["unknown parameter `tenant_id`"] },

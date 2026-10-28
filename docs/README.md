@@ -40,3 +40,10 @@ include imports, declarations, a connection and an entry point.
 
 For internals, see [Architecture](../ARCHITECTURE.md). For a sequence of
 commands with expected output, see [Examples](../examples/README.md).
+
+## ERP development contracts
+
+- [ERP persistence](erp-persistence.md): concurrency, scoped repositories, transactions, validation, audit, outbox and bounded work.
+- [Financial values](financial-values.md): exact arithmetic, rounding, server numeric storage and SQL expressions.
+
+These source additions have not been compiled or executed in the current batch.

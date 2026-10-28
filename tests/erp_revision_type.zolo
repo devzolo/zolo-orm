@@ -1,0 +1,8 @@
+use orm::Model
+@derive(Model)
+struct Invalid {
+  @model(primary_key: true)
+  id: int,
+  @model(version: true)
+  revision: str,
+}

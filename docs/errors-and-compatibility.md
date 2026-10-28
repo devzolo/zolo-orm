@@ -4,7 +4,7 @@
 
 ## Errors
 
-`OrmError` has seven variants:
+`OrmError` exposes these failure contracts:
 
 | Variant | When |
 | --- | --- |
@@ -12,15 +12,20 @@
 | `NotFound(str)` | A required read found no record. Carries the model name, never the key or filter values. |
 | `Decode(str)` | A row could not be turned into the model. |
 | `FieldDecode(DecodeError)` | A field had an unexpected type. Carries model, field and expected type, never the value. |
-| `UnsafeMutation(str)` | A delete without a filter, or with ordering/pagination. |
+| `UnsafeMutation(str)` | An unsafe mutation, invalid transaction/lifecycle use or unsupported write shape. |
 | `Unsupported(str)` | A runtime without database support. |
 | `InvalidPagination(str)` | Invalid page bounds, offset overflow or incompatible query ordering/pagination. |
+| `Conflict(int)` | A conditional or versioned write did not affect exactly one row. |
+| `Validation(ValidationErrors)` | Accumulated field/path/code/message errors before a validated write. |
+| `ScopeViolation(str)` | A scoped repository write conflicts with its company/branch or immutable fields. |
 
-For SQLite constraint failures, match `OrmError.Database(cause)` and use
+For classified SQLite/PostgreSQL/MySQL constraint failures, match `OrmError.Database(cause)` and use
 `cause.is(DbErrorKind::UniqueViolation)` or `match cause.kind()`. Import
 `DbErrorKind` from `std::database`; no driver-message parsing is needed.
 The available constraint kinds are `UniqueViolation`, `ForeignKeyViolation`,
 `NotNullViolation`, `CheckViolation` and the general `ConstraintViolation`.
+Transient server failures include `SerializationFailure`, `Deadlock` and
+`LockTimeout`; `DbError.is_retryable()` classifies these without automatic retries.
 Other SQL execution failures remain `QueryFailed`.
 
 [error_handling.zolo](../examples/error_handling.zolo) shows a registration flow
@@ -61,7 +66,8 @@ scope, not a completed validation of this local batch.
 | Zolo VM + SQLite | ORM queries, writes, transactions and migrations. |
 | Native / Cranelift + SQLite | Runnable package examples and the same generated API. |
 | LLVM + SQLite | Runnable package examples and the same generated API. |
-| PostgreSQL / MySQL SQL rendering | Statement inspection; bound ORM execution and migrations are not supported. |
+| PostgreSQL | New source paths for bound execution, pooled/pinned transactions and reviewed migrations; server validation is pending. |
+| MySQL | New driver bound execution, exact decimal scalars and pinned transactions. Full ORM RETURNING/upsert/migrations remain limited; do not infer parity from successful connection. |
 | Browser Playground | The underlying in-memory SQLite bridge, SQL builder and reflection are tested. This does not establish standalone ORM package/project support in the Playground. |
 | wasm-aot | Language/reflection tests exist; full database-backed ORM execution is not supported. |
 
@@ -93,6 +99,8 @@ contains what has been published to that branch.
   [Domain codecs](domain-codecs.md) additionally expose binary storage and
   [built-in domains](builtin-codecs.md). Codec fields cannot be keys and do not
   imply ordering, ranges or arithmetic; count_value can count their presence.
+  Explicit numeric decimal storage adds exact server arithmetic/order/aggregates;
+  see [financial contracts](financial-values.md).
 - Advanced indexes support per-term direction, supported unary transforms and
   conjunctions of typed NULL/boolean predicates. UNIQUE expression/partial
   indexes do not generate upsert methods. See the exact [schema subset](advanced-schemas.md).
@@ -103,7 +111,10 @@ contains what has been published to that branch.
   The scalar cursor_page shorthand retains its int/str key contract. seek_page
   supports several ordering fields and joined/projected results; it rejects
   grouped/aggregate results and accepts at most 24 ordering terms including keys.
-- No streaming API, async execution, prepared-statement cache or connection pool.
+- PostgreSQL connection pooling is configurable through URL pool_size/pool_timeout
+  options. The ORM each_chunk helper uses bounded keyset pages. Public execution
+  is synchronous; driver streaming adapters still buffer rows, and no bounded
+  server-cursor API or public prepared-statement cache is claimed.
 - Reviewed SQLite rebuilds require `--allow-rebuild` and preserve primary-key
   identity and compatible data. Lossy casts and unsupported schema objects are
   rejected; discarding columns still requires `--allow-destructive`. Version 3
@@ -125,3 +136,10 @@ contains what has been published to that branch.
 | A foreign-key error occurs | Create the parent first and check the key/action. Loading metadata alone is not enforcement. |
 | An existing table did not change | `create_table` does not migrate it; generate and apply reviewed migrations. |
 | A migration rejects the live catalog | Inspect drift or unsupported schema details; baseline does not erase mismatches. |
+
+## ERP source contracts
+
+See [ERP persistence](erp-persistence.md) for optimistic revisions, explicit scoped
+repositories, callback-scoped transactions, validation, audit/outbox and their
+escape-hatch/at-least-once semantics. No executable validation was performed for
+this batch, and no matching compiler/runtime/editor was installed.

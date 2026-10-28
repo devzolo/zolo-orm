@@ -1,12 +1,20 @@
 # Built-in codecs
 
-Import domains and codecs from `orm`. Dates, UTC timestamps and decimals use
-canonical text; blobs use real binary SQL values.
+Use native `decimal` and `bigdecimal` directly in models; their numeric codecs
+are selected automatically. See [financial values](financial-values.md).
+
+Import compatibility domains and other codecs from `orm`. Dates, UTC timestamps
+and the legacy ExactDecimal wrapper use
+canonical text by default; blobs use real binary SQL values. Exact decimals can
+opt into server numeric storage with `storage: .Decimal` and explicit precision
+and scale; see [financial values](financial-values.md).
 
 | Domain | Constructor | Codec | Storage |
 | --- | --- | --- | --- |
 | `Date` | `Date::parse("2024-02-29")` | `DateCodec` | `.Text` |
 | `Timestamp` | `Timestamp::parse("2024-02-29T12:30:00.1Z")` | `TimestampCodec` | `.Text` |
+| `decimal` | `19.99d` / `decimal::parse(text)` | Automatic | `.Decimal` (default) / `.Text` |
+| `bigdecimal` | `19.99bd` / `bigdecimal::parse(text)` | Automatic | `.Decimal` (default) / `.Text` |
 | `ExactDecimal` | `ExactDecimal::parse("9007199254740993.01")` | `DecimalCodec` | `.Text` |
 | `Blob` | `Blob::from_bytes([0, 255, 128])` | `BlobCodec` | `.Binary` |
 
@@ -30,8 +38,10 @@ struct Receipt {
 The same codec handles creates, saves, named changes, filters and projections.
 A nullable field preserves SQL NULL; an empty blob is a present value with zero
 bytes. Query comparisons encode domain values before binding them. Aggregate
-arithmetic and ordering on encoded domain fields are rejected: text ordering
-does not define decimal numeric order.
+arithmetic and ordering on text-encoded domain fields are rejected: text ordering
+does not define decimal numeric order. Opting into `.Decimal` enables exact
+numeric comparisons, ordering, SUM/MIN/MAX and supported SQL arithmetic while
+retaining the domain decoder.
 
 ## Text formats and validation
 

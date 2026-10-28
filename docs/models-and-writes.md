@@ -215,9 +215,16 @@ rows.
 Inspect the exact SQL and ordered bindings before execution:
 
 ```rust
-let statement = User::upsert_by_email_statement(input, patch)
+let statement = User::upsert_by_email_statement(input, patch)?
 print(statement.text)
 ```
+
+The inspection method returns `Result<Statement, OrmError>` and enforces the same
+write rules as execution. A versioned model permits only an empty upsert patch:
+a conflict update has no known expected revision. Use `apply_if_version` to update
+an existing versioned record. When the model contains only a generated identity
+and that identity is omitted, the statement allocates a new row with
+`INSERT ... DEFAULT VALUES RETURNING`.
 
 See [schema_writes.zolo](../examples/schema_writes.zolo) for default preservation,
 explicit NULL patches, composite/nullable targets and empty-patch behavior.

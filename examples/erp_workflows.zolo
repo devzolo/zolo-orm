@@ -1,0 +1,82 @@
+//! Validation, audit, outbox and business numbering share one transaction.
+use std::database::Database
+use orm::{Model, OrmError, Actor, AuditEntry, OutboxEvent, transact, create_infrastructure, pending_events, acknowledge_event, diff_collection, Change}
+
+@derive(Model)
+@model(table: "erp_orders")
+struct Order {
+  @model(primary_key: true)
+  id: int,
+  units: int,
+  status: str,
+  @model(redact: true)
+  private_note: str,
+  @model(version: true)
+  revision: int = 0,
+}
+
+fn exercise_workflows() {
+  let db = Database.open("sqlite://:memory:").unwrap()
+  defer db.close()
+  Order::create_table(db).unwrap()
+  create_infrastructure(db).unwrap()
+  let actor = Actor.new("operator-7", "request-42")
+  let before = Order::create(db, id: 1, units: 2, status: "draft", private_note: "internal").unwrap()
+  let rejected = Order::change(before, Order.new(1, -1, "draft", "internal", 0))
+  assert(transact(db, |tx| -> Result<int, OrmError> {
+    Order::write_change(tx, rejected, |change, errors| {
+      errors.require((change.after?.units ?? 0) > 0, "units", "positive", "Quantity must be positive")
+    })?
+    return Result::Ok(1)
+  }, actor).is_err())
+  assert(Order::find_or_error(db, 1).unwrap().units == 2)
+
+  // A caller-provided diff cannot hide a changed value from the write validator.
+  let hidden = Change.new(before, Order.new(1, 9, "draft", "internal", 0), [])
+  assert(transact(db, |tx| -> Result<int, OrmError> {
+    Order::write_change(tx, hidden, |next, errors| {
+      errors.require(!next.changed("units"), "units", "immutable", "Units cannot change here")
+    })?
+    return Result::Ok(1)
+  }).is_err())
+  assert(Order::find_or_error(db, 1).unwrap().units == 2)
+
+  let proposed = Order.new(1, 3, "confirmed", "another secret", 0)
+  let change = Order::change(before, proposed)
+  assert(change.changed("private_note"))
+  assert(!change.audit_json(["private_note", "units"]).contains("secret"))
+  let saved = transact(db, |tx| -> Result<Order, OrmError> {
+    let result = Order::write_change(tx, change, |next, errors| {
+      let units = next.after?.units ?? 0
+      errors.require(units > 0, "units", "positive", "Quantity must be positive")
+    })? ?? panic("update returned no order")
+    let number = tx.next_number("company:7/orders:2026")?
+    tx.audit(AuditEntry.new("audit-1", "Order", "1", "update", change.audit_json(["units", "status"])))?
+    tx.emit(OutboxEvent::json("event-1", "order.confirmed", "Order/1", #{id: result.id, number}))?
+    return Result::Ok(result)
+  }, actor).unwrap()
+  assert(saved.revision == 1 && saved.units == 3)
+  let events = pending_events(db).unwrap()
+  assert(events.len() == 1 && events[0].id == "event-1")
+  acknowledge_event(db, events[0].id).unwrap()
+  assert(pending_events(db).unwrap().len() == 0)
+
+  assert(transact(db, |tx| -> Result<int, OrmError> {
+    tx.emit(OutboxEvent::json("rolled-back", "order.changed", "Order/1", #{id: 1}))?
+    tx.next_number("company:7/orders:2026")?
+    return Result::Err(OrmError::UnsafeMutation("application rejected the operation"))
+  }, actor).is_err())
+  assert(pending_events(db).unwrap().len() == 0)
+  let number = transact(db, |tx| tx.next_number("company:7/orders:2026")).unwrap()
+  assert(number == 2)
+
+  let diff = diff_collection([before], [proposed, Order.new(2, 1, "draft", "", 0)], |item| item.id).unwrap()
+  assert(diff.added.len() == 1 && diff.kept.len() == 1 && diff.removed.len() == 0)
+  assert(diff_collection([before], [proposed, proposed], |item| item.id).is_err())
+}
+
+@test
+fn transactional_workflow_contract() { exercise_workflows() }
+
+exercise_workflows()
+print("orm ERP workflows: ok")

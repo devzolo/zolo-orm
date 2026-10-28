@@ -1,6 +1,6 @@
 # zolo-orm
 
-Typed SQLite models and queries for Zolo, generated from ordinary structs.
+Typed relational models and queries for Zolo, generated from ordinary structs.
 
 Declare a model once, then use typed creation, partial updates, atomic upserts,
 query projections and explicit relation loading. The same metadata produces
@@ -18,6 +18,17 @@ keys and advanced indexes.
 
 [Get started](docs/getting-started.md) · [Documentation](docs/README.md) ·
 [Runnable examples](examples/README.md) · [Architecture](ARCHITECTURE.md)
+
+## ERP development branch
+
+The current source work adds PostgreSQL execution, pinned transactions, exact
+decimal arithmetic and numeric storage, conditional updates, optimistic revisions,
+explicit company scopes, validation, audit and outbox helpers. This batch has not
+been compiled or executed; runtime/editor refresh and publication are pending.
+
+Start with [ERP persistence](docs/erp-persistence.md) and
+[financial values](docs/financial-values.md). They explain the contracts and
+remaining boundaries, including explicit scoped access and at-least-once events.
 
 ## Run the first example
 
@@ -233,3 +244,8 @@ to compare strategies on your machine.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Native `decimal` and `bigdecimal` fields now select numeric codecs automatically;
+use ordinary `d`/`bd` literals and operators, with explicit rounding before writes.
+See [financial values](docs/financial-values.md). Existing `ExactDecimal` models
+remain compatible. This follow-up is source-only, with execution gates pending.

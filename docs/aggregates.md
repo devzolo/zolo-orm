@@ -15,8 +15,13 @@ Division produces a nullable real value: a zero divisor produces SQL NULL.
 Nullable operands propagate NULL. Integer overflow is not silently converted
 into a truncated application value: execution or decoding can return an error.
 Remainder is not captured because Zolo and SQLite use different negative-value
-semantics. Codec domains require explicit application-side conversions; their
-stored scalars do not imply arithmetic on the logical type.
+semantics. Text and binary codec domains require explicit application-side conversions;
+their stored scalars do not imply arithmetic on the logical type. Numeric decimal
+storage (automatic for native `decimal`/`bigdecimal` fields) is an explicit
+exception: `.Decimal` supports exact `+`, `-`, `*`,
+SUM/MIN/MAX, returning the same domain (nullable where SQL can return NULL).
+Decimal division and AVG require an explicit scale/rounding policy and are not
+captured; see [financial values](financial-values.md).
 
 ## Aggregate expressions
 
@@ -69,3 +74,12 @@ The same capture protocol applies to relation joins and composed views.
 Lambda parameters retain source order and LEFT-join nullability. Bound values
 are collected in SQL order: SELECT, ON, WHERE, then HAVING. Grouping keys do not
 contain bound values.
+
+## Conditional values
+
+Captured `if condition { a } else { b }` becomes SQL CASE. `nullable ?? fallback`
+becomes COALESCE, retaining bindings and inferred result nullability. Both forms
+can appear in selections and in [conditional updates](erp-persistence.md).
+Primitive integer SUM is decoded as an integer and reports overflow; primitive
+AVG and division use real arithmetic. Decimal aggregates keep exact server
+numeric values through their codec.

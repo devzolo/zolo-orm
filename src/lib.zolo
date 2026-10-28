@@ -1,8 +1,13 @@
 //! Typed models generated at compile time, backed by std::database and zolo-sql.
 use std::database::{Database, DbError, SQL}
-pub use crate::codecs::{Date, DateCodec, Timestamp, TimestampCodec, ExactDecimal, DecimalCodec, Blob, BlobCodec}
+pub use crate::codecs::{Date, DateCodec, Timestamp, TimestampCodec, ExactDecimal, DecimalCodec, NativeDecimalCodec, BigDecimalCodec, Blob, BlobCodec}
 pub use crate::cursor::QueryCursor
 use crate::cursor::{cursor_layout, contains_aggregate}
+pub use std::decimal::Rounding
+use crate::codecs::NativeDecimalCodec as __orm_builtin_fixed_decimal_codec
+use crate::codecs::BigDecimalCodec as __orm_builtin_big_decimal_codec
+pub use crate::codecs::checked_decimal_storage
+pub use crate::erp::{MutationResult, Actor, Transaction, transact, FieldError, ValidationErrors, FieldChange, Change, AuditEntry, OutboxEvent, infrastructure_schema, create_infrastructure, pending_events, acknowledge_event, CollectionDiff, diff_collection, query_rows}
 
 pub enum OrmError {
   Database(DbError),
@@ -14,6 +19,10 @@ pub enum OrmError {
   /// Invalid page bounds or query clauses incompatible with pagination.
   InvalidPagination(str),
   Unsupported(str),
+  /// Expected one row, but the conditional write affected this many.
+  Conflict(int),
+  Validation(ValidationErrors),
+  ScopeViolation(str),
 }
 
 /// Structured decoding context, without exposing the rejected database value.
@@ -56,6 +65,21 @@ pub struct UpdatePlan {
 }
 
 impl UpdatePlan {
+  /// Generated writes accept only known mutable columns and bound values.
+  fn validate_columns(self, columns: [str]) -> Result<bool, OrmError> {
+    let seen: [str] = []
+    for assignment in self.assignments {
+      if !columns.contains(assignment.column) || seen.contains(assignment.column) {
+        return Result::Err(OrmError::UnsafeMutation("patch requires distinct mutable model columns"))
+      }
+      if !((assignment.slot == "?" && assignment.params.len() == 1)
+        || (assignment.slot == "NULL" && assignment.params.len() == 0)) {
+        return Result::Err(OrmError::UnsafeMutation("patch values must use a bound parameter or NULL"))
+      }
+      seen.push(assignment.column)
+    }
+    return Result::Ok(true)
+  }
   fn set(self, column: str, value: Any) -> UpdatePlan {
     let next = self.assignments.filter(|item| item.column != column)
     let params: [Any] = []
@@ -75,6 +99,25 @@ impl UpdatePlan {
   }
   fn apply(self, db: Database, table_name: str, key_column: str, key: Any) -> Result<int, OrmError> {
     return self.apply_keys(db, table_name, [key_column], [key])
+  }
+  fn apply_version(self, db: Database, table_name: str, key_columns: [str], keys: [Any], revision: str, expected: int, decimal: bool = false) -> Result<int, OrmError> {
+    if expected < 0 || expected == 9223372036854775807 {
+      return Result::Err(OrmError::UnsafeMutation("revision must be nonnegative and leave room for increment"))
+    }
+    if key_columns.len() == 0 || key_columns.len() != keys.len() { return Result::Err(OrmError::UnsafeMutation("invalid primary-key arity")) }
+    let params: [Any] = []
+    let clauses: [str] = []
+    for assignment in self.assignments {
+      if assignment.column == revision { return Result::Err(OrmError::UnsafeMutation("revision is managed by the ORM")) }
+      clauses.push(assignment.column + " = " + assignment.slot)
+      for value in assignment.params { params.push(value) }
+    }
+    clauses.push(revision + " = " + revision + " + 1")
+    for key in keys { params.push(key) }
+    params.push(expected)
+    let where_key = key_columns.map(|column| column + " = ?").join(" AND ")
+    let affected = Statement.new("UPDATE " + table_name + " SET " + clauses.join(", ") + " WHERE " + where_key + " AND " + revision + " = ?", params, decimal).execute(db)?
+    return MutationResult.new(affected).expect_one()
   }
   fn apply_keys(self, db: Database, table_name: str, key_columns: [str], keys: [Any]) -> Result<int, OrmError> {
     if key_columns.len() == 0 || key_columns.len() != keys.len() { return Result::Err(OrmError::UnsafeMutation("invalid primary-key arity")) }
@@ -105,6 +148,7 @@ pub fn bind_value(params: [Any], value: Any) -> str {
 pub struct Statement {
   pub text: str,
   pub params: [Any],
+  pub requires_decimal: bool = false,
 }
 
 impl Statement {
@@ -112,11 +156,21 @@ impl Statement {
     return SQL.compile(self.text, dialect)
   }
   fn execute(self, db: Database) -> Result<int, OrmError> {
+    require_decimal_driver(db, self.requires_decimal)?
     return db.execute(self.text, self.params).map_err(|e| OrmError::Database(e))
   }
   fn query(self, db: Database) -> Result<[Any], OrmError> {
+    require_decimal_driver(db, self.requires_decimal)?
     return db.query(self.text, self.params).map_err(|e| OrmError::Database(e))
   }
+}
+
+/// SQLite NUMERIC affinity may convert decimal text to binary floating point.
+pub fn require_decimal_driver(db: Database, required: bool) -> Result<bool, OrmError> {
+  if required && db.driver() != "postgres" && db.driver() != "mysql" {
+    return Result::Err(OrmError::Unsupported("numeric decimal storage requires PostgreSQL or MySQL; textual DecimalCodec remains portable"))
+  }
+  return Result::Ok(true)
 }
 
 /// Persistent predicate link: extending a query does not copy earlier bindings.
@@ -203,6 +257,7 @@ pub struct QueryPlan {
   pub grouping: [Any] = [],
   pub having_filters: FilterNode? = nil,
   pub projection_selected: bool = false,
+  pub requires_decimal: bool = false,
 }
 
 impl QueryPlan {
@@ -223,6 +278,7 @@ impl QueryPlan {
       self.grouping,
       self.having_filters,
       self.projection_selected,
+      self.requires_decimal,
     )
   }
   fn equal(self, column: str, value: Any) -> QueryPlan {
@@ -239,53 +295,53 @@ impl QueryPlan {
   fn order(self, column: Any, descending: bool) -> QueryPlan {
     let ordering = self.ordering.map(|item| item)
     ordering.push(#{column, descending})
-    return QueryPlan.new(self.table, self.columns, self.filters, ordering, self.take, self.skip, self.alias, self.joins, self.join_filters, self.page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected)
+    return QueryPlan.new(self.table, self.columns, self.filters, ordering, self.take, self.skip, self.alias, self.joins, self.join_filters, self.page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected, self.requires_decimal)
   }
   fn limit(self, count: int) -> QueryPlan {
     if count < 0 { panic("orm: limit must be non-negative") }
-    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, count, self.skip, self.alias, self.joins, self.join_filters, self.page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected)
+    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, count, self.skip, self.alias, self.joins, self.join_filters, self.page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected, self.requires_decimal)
   }
   fn offset(self, count: int) -> QueryPlan {
     if count < 0 { panic("orm: offset must be non-negative") }
-    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, count, self.alias, self.joins, self.join_filters, self.page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected)
+    return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, count, self.alias, self.joins, self.join_filters, self.page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected, self.requires_decimal)
   }
   fn project(self, columns: [Any]) -> QueryPlan { return self.project_expr(columns, []) }
   fn project_expr(self, columns: [Any], values: [Any]) -> QueryPlan {
     return QueryPlan.new(self.table, columns, self.filters, self.ordering, self.take, self.skip,
       self.alias, self.joins, self.join_filters, self.page_keys, self.source,
-      values, self.grouping, self.having_filters, true)
+      values, self.grouping, self.having_filters, true, self.requires_decimal)
   }
   fn group(self, columns: [Any]) -> QueryPlan {
     if columns.len() == 0 { panic("orm: GROUP BY requires at least one field") }
     return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, self.skip,
       self.alias, self.joins, self.join_filters, self.page_keys, self.source,
-      self.projection_values, columns, self.having_filters, self.projection_selected)
+      self.projection_values, columns, self.having_filters, self.projection_selected, self.requires_decimal)
   }
   fn having(self, predicate: Any, values: [Any]) -> QueryPlan {
     return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, self.skip,
       self.alias, self.joins, self.join_filters, self.page_keys, self.source,
-      self.projection_values, self.grouping, FilterNode.new(self.having_filters, predicate, values), self.projection_selected)
+      self.projection_values, self.grouping, FilterNode.new(self.having_filters, predicate, values), self.projection_selected, self.requires_decimal)
   }
   fn cursor_columns(self, columns: [Any], ordering: [Any]) -> QueryPlan {
     return QueryPlan.new(self.table, columns, self.filters, ordering, self.take, self.skip,
       self.alias, self.joins, self.join_filters, self.page_keys, self.source,
-      self.projection_values, self.grouping, self.having_filters, self.projection_selected)
+      self.projection_values, self.grouping, self.having_filters, self.projection_selected, self.requires_decimal)
   }
   fn aggregated(self) -> bool {
     return self.grouping.len() > 0 || self.having_filters != nil
       || self.columns.filter(|column| contains_aggregate(column)).len() > 0
   }
-  fn join(self, table_name: str, kind: str, column: str, referenced: str, columns: [Any], page_keys: [Any] = []) -> QueryPlan {
+  fn join(self, table_name: str, kind: str, column: str, referenced: str, columns: [Any], page_keys: [Any] = [], decimal: bool = false) -> QueryPlan {
     if self.joins.len() > 0 { panic("orm: this query already has a relation join") }
     if self.projection_selected { panic("orm: add relation joins before selecting a projection") }
     let join_predicate = #{op: "eq", column: #{table: "orm_l", column}, other: #{table: "orm_r", column: referenced}}
     let joins: [Any] = [#{kind, table: table_name, alias: "orm_r", on: join_predicate}]
-    return QueryPlan.new(self.table, columns, self.filters, self.ordering, self.take, self.skip, "orm_l", joins, nil, page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected)
+    return QueryPlan.new(self.table, columns, self.filters, self.ordering, self.take, self.skip, "orm_l", joins, nil, page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected, self.requires_decimal || decimal)
   }
   fn on(self, predicate: Any, values: [Any]) -> QueryPlan {
     if self.joins.len() == 0 { panic("orm: ON requires a relation join") }
     return QueryPlan.new(self.table, self.columns, self.filters, self.ordering, self.take, self.skip,
-      self.alias, self.joins, FilterNode.new(self.join_filters, predicate, values), self.page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected)
+      self.alias, self.joins, FilterNode.new(self.join_filters, predicate, values), self.page_keys, self.source, self.projection_values, self.grouping, self.having_filters, self.projection_selected, self.requires_decimal)
   }
   /// Prepare a numbered page without changing this reusable query.
   fn for_page(self, number: int, size: int) -> Result<QueryPlan, OrmError> {
@@ -327,7 +383,7 @@ impl QueryPlan {
 
   fn read_source(self) -> str { return if self.source == "" { self.table } else { self.source } }
 
-  fn try_statement(self, kind: str) -> Result<Statement, OrmError> {
+  fn try_statement(self, kind: str, lock: str? = nil) -> Result<Statement, OrmError> {
     let where_parts = collect_filters(self.filters)
     let on_parts = collect_filters(self.join_filters)
     let having_parts = collect_filters(self.having_filters)
@@ -368,9 +424,10 @@ impl QueryPlan {
       order: ordering,
       limit: take,
       offset: skip,
+      lock,
     }
     let sql = SQL.build(spec).map_err(|error| OrmError::Database(error))?
-    return Result::Ok(Statement.new(sql, bindings))
+    return Result::Ok(Statement.new(sql, bindings, self.requires_decimal))
   }
   fn statement(self, kind: str) -> Statement { return self.try_statement(kind).unwrap() }
   fn select(self) -> Statement { return self.statement("select") }
@@ -388,6 +445,33 @@ impl QueryPlan {
     let stmt = self.try_statement("exists")?
     let rows = stmt.query(db)?
     return Result::Ok(rows.len() > 0)
+  }
+
+  /// Inspect a filtered atomic update. Assignment bindings precede predicates.
+  fn update_statement(self, assignments: [Any], values: [Any]) -> Result<Statement, OrmError> {
+    if self.filters == nil { return Result::Err(OrmError::UnsafeMutation("update requires a filter")) }
+    if self.aggregated() || self.joins.len() > 0 || self.alias != nil || self.projection_selected {
+      return Result::Err(OrmError::UnsafeMutation("update requires an unprojected single-model query"))
+    }
+    if self.take >= 0 || self.skip != 0 || self.ordering.len() > 0 {
+      return Result::Err(OrmError::UnsafeMutation("update does not accept ordering or pagination"))
+    }
+    for assignment in assignments {
+      for key in self.page_keys {
+        if assignment.column == key { return Result::Err(OrmError::UnsafeMutation("update cannot change a primary key")) }
+      }
+    }
+    let predicate = collect_filters(self.filters)
+    let params: [Any] = []
+    for value in values { params.push(value) }
+    for value in predicate.params { params.push(value) }
+    let sql = SQL.build(#{kind: "update", table: self.table, assignments, predicate: predicate.predicate})
+      .map_err(|error| OrmError::Database(error))?
+    return Result::Ok(Statement.new(sql, params, self.requires_decimal))
+  }
+  fn update(self, db: Database, assignments: [Any], values: [Any]) -> Result<MutationResult, OrmError> {
+    let affected = self.update_statement(assignments, values)?.execute(db)?
+    return Result::Ok(MutationResult.new(affected))
   }
 
   /// Unfiltered deletion and pagination on mutations require an explicit decision.
@@ -578,6 +662,8 @@ struct ModelOptions {
   advanced_indexes: {str: IndexOptions} = #{},
   indexes: {str: [FieldRef]} = #{},
   unique_indexes: {str: [FieldRef]} = #{},
+  /// Fields required by the generated scoped repository.
+  scope: [FieldRef] = [],
 }
 
 /// Referential action applied by the database to a declared foreign key.
@@ -617,7 +703,9 @@ struct IndexOptions {
 }
 
 /// Physical scalar representation of a domain codec.
-pub enum StorageType { Text, Integer, Real, Boolean, Binary }
+pub enum LockWait { Wait, NoWait, SkipLocked }
+
+pub enum StorageType { Text, Integer, Real, Boolean, Binary, Decimal }
 
 struct FieldOptions {
   codec: TypeRef? = nil,
@@ -634,6 +722,13 @@ struct FieldOptions {
   on_update: ForeignKeyAction = .NoAction,
   /// Explicit SQL literal default for schema migrations; Zolo defaults remain application-side.
   default_sql: str = "",
+  /// Server NUMERIC storage. Native decimal types select their codec automatically.
+  precision: int = 38,
+  scale: int = 2,
+  /// Integer optimistic revision, compared and incremented by versioned writes.
+  version: bool = false,
+  /// Excluded from generated audit changes.
+  redact: bool = false,
 }
 
 @comptime
@@ -919,8 +1014,9 @@ fn foreign_key_clause(field) -> str {
 @comptime
 fn field_kind(field) -> str {
   if field_codec(field) != nil {
-    return match model_option(field.decorators, "storage", StorageType::Text) {
+    return match field_storage(field) {
       StorageType::Text => "str",
+      StorageType::Decimal => "str",
       StorageType::Integer => "int",
       StorageType::Real => "float",
       StorageType::Boolean => "bool",
@@ -931,9 +1027,49 @@ fn field_kind(field) -> str {
   return if field.type.is_optional { field.type.inner.kind } else { field.type.kind }
 }
 
+/// Inspect the reflected primitive, never a nominal type merely named similarly.
+@comptime
+fn native_decimal_kind(field) -> str {
+  let value = if field.type.is_optional { field.type.inner } else { field.type }
+  let kind = value.kind.lower()
+  return if value.is_primitive && (kind == "decimal" || kind == "bigdecimal") { kind } else { "" }
+}
+
+@comptime
+fn field_storage(field) -> StorageType {
+  let explicit = model_option(field.decorators, "storage", nil)
+  if explicit != nil { return explicit }
+  return if native_decimal_kind(field) != "" { StorageType::Decimal } else { StorageType::Text }
+}
+
+@comptime
+fn numeric_decimal(field) -> bool { return field_storage(field) == StorageType::Decimal }
+
+@comptime
+fn decimal_precision(field) -> int {
+  let fallback = if native_decimal_kind(field) == "decimal" { 28 } else { 38 }
+  return model_option(field.decorators, "precision", fallback)
+}
+
 @comptime
 fn field_codec(field) {
-  return model_option(field.decorators, "codec", nil)
+  let explicit = model_option(field.decorators, "codec", nil)
+  if explicit != nil { return explicit }
+  let kind = native_decimal_kind(field)
+  if kind == "decimal" { return typeinfo(__orm_builtin_fixed_decimal_codec) }
+  if kind == "bigdecimal" { return typeinfo(__orm_builtin_big_decimal_codec) }
+  return nil
+}
+
+/// Automatic codec calls need real consumer bindings, not the producer's locals.
+@comptime
+fn runtime_codec_ref(field, info) {
+  let explicit = model_option(field.decorators, "codec", nil)
+  if explicit != nil { return explicit.ref }
+  let kind = native_decimal_kind(field)
+  if kind == "decimal" { return generated_local(info, "__orm_" + info.name + "_NativeDecimalCodec") }
+  if kind == "bigdecimal" { return generated_local(info, "__orm_" + info.name + "_BigDecimalCodec") }
+  panic("orm: missing runtime codec")
 }
 
 @comptime
@@ -955,12 +1091,26 @@ fn encoded_value(field, owner: Syntax<.Ident>, input: Syntax<.Expr>) -> Syntax<.
   return quote expr { ${owner}::${encoder}(${input}) }
 }
 
+/// Predicates and expressions do not inherit a destination column's scale.
+@comptime
+fn query_encoded_value(field, owner: Syntax<.Ident>, input: Syntax<.Expr>) -> Syntax<.Expr> {
+  if field_codec(field) == nil { return input }
+  let encoder = syntax.ident("__orm_query_encode_" + field.name)
+  return quote expr { ${owner}::${encoder}(${input}) }
+}
+
 @comptime
 fn query_schema_field(field, column: str) -> Syntax<.Member> {
   let codec = field_codec(field)
   if codec == nil {
     return quote member {
       @sql_column(name: ${column})
+      pub ${field.member}: ${field.type.ref},
+    }
+  }
+  if numeric_decimal(field) {
+    return quote member {
+      @sql_column(name: ${column}, storage: ${field_kind(field)}, encoder: ${"__orm_encode_" + field.name}, query_encoder: ${"__orm_query_encode_" + field.name}, codec: ${codec.identity}, numeric: true)
       pub ${field.member}: ${field.type.ref},
     }
   }
@@ -980,19 +1130,21 @@ fn generated_local(info, stem: str) -> Syntax<.Ident> {
 }
 
 @comptime
-fn decode_field(field, owner: str) -> Syntax<.Expr> {
+fn decode_field(field, info) -> Syntax<.Expr> {
   let name = column_name(field)
-  return decode_value(field, owner, quote expr { row[${name}] })
+  return decode_value(field, info, quote expr { row[${name}] })
 }
 
 @comptime
-fn decode_value(field, owner: str, input: Syntax<.Expr>) -> Syntax<.Expr> {
+fn decode_value(field, info, input: Syntax<.Expr>) -> Syntax<.Expr> {
+  let owner = info.name
   let reader = syntax.ident("read_" + field_kind(field))
   let scalar = quote expr { ${reader}(${input}, ${field.name}, ${owner})? }
   let codec = field_codec(field)
   let value = if codec == nil { scalar } else {
+    let reference = runtime_codec_ref(field, info)
     quote expr {
-      ${codec.ref}::decode(${scalar}).map_err(|_| decoding_error(${owner}, ${field.name}, ${field.type.name}))?
+      ${reference}::decode(${scalar}).map_err(|_| decoding_error(${owner}, ${field.name}, ${field.type.name}))?
     }
   }
   if field.type.is_optional {
@@ -1070,6 +1222,36 @@ pub fn Model(info) -> Syntax<.Items> {
   let table = identifier(table_name)
   let keys = model_primary_fields(info)
   let key_names = keys.map(|field| field.name)
+  let version_fields = info.fields.filter(|field| field.opts.version)
+  if version_fields.len() > 1 { panic("orm: only one revision field is allowed") }
+  let revision = if version_fields.len() == 0 { nil } else { version_fields[0] }
+  if revision != nil && (field_kind(revision) != "int" || revision.type.is_optional || field_codec(revision) != nil || key_names.contains(revision.name)) {
+    panic("orm: revision requires a nonoptional integer field outside the primary key")
+  }
+  let scoped_fields = []
+  for field in info.opts.scope {
+    if field.owner.identity != info.identity { panic("orm: scope field must belong to this model") }
+    if field.info.type.is_optional || field_codec(field.info) != nil || !["int", "str"].contains(field_kind(field.info)) {
+      panic("orm: scope fields require nonoptional integer or string values")
+    }
+    if scoped_fields.filter(|item| item.name == field.name).len() > 0 { panic("orm: duplicate scope field") }
+    scoped_fields.push(info.fields.filter(|item| item.name == field.name)[0])
+  }
+  if revision != nil && scoped_fields.filter(|field| field.name == revision.name).len() > 0 { panic("orm: revision cannot be a scope field") }
+  let immutable_names = key_names.map(|name| name)
+  for field in scoped_fields { if !immutable_names.contains(field.name) { immutable_names.push(field.name) } }
+  if revision != nil { immutable_names.push(revision.name) }
+  let requires_decimal = info.fields.filter(|field| numeric_decimal(field)).len() > 0
+  for field in info.fields.filter(|field| numeric_decimal(field)) {
+    if field_codec(field) == nil { panic("orm: numeric decimal storage requires a codec") }
+    let precision = decimal_precision(field)
+    if precision < 1 || precision > 1000 || field.opts.scale < 0 || field.opts.scale > precision {
+      panic("orm: decimal precision must be 1..1000 and scale must be 0..precision")
+    }
+    if native_decimal_kind(field) == "decimal" && precision > 28 {
+      panic("orm: decimal columns support precision up to 28; use bigdecimal for wider columns")
+    }
+  }
   var seen: [str] = []
   var query_names: [str] = []
   for field in info.fields {
@@ -1079,6 +1261,10 @@ pub fn Model(info) -> Syntax<.Items> {
     seen.push(name.lower())
     let kind = field_kind(field)
     let codec = field_codec(field)
+    if native_decimal_kind(field) != "" && model_option(field.decorators, "codec", nil) == nil
+      && field_storage(field) != StorageType::Decimal && field_storage(field) != StorageType::Text {
+      panic("orm: native decimals require Decimal or Text storage; never use floating-point storage")
+    }
     if codec != nil && (key_names.contains(field.name) || field.opts.generated || field.opts.belongs_to != nil) {
       panic("orm: codec fields cannot be primary, generated or relation keys")
     }
@@ -1130,8 +1316,8 @@ pub fn Model(info) -> Syntax<.Items> {
       "where_" + field.name, "where_" + field.name + "_not",
       "where_" + field.name + "_in",
     ]
-    if codec == nil { methods.push("order_by_" + field.name) }
-    if kind != "bool" && codec == nil {
+    if codec == nil || numeric_decimal(field) { methods.push("order_by_" + field.name) }
+    if kind != "bool" && (codec == nil || numeric_decimal(field)) {
       methods.push("where_" + field.name + "_gt")
       methods.push("where_" + field.name + "_lt")
     }
@@ -1168,6 +1354,8 @@ pub fn Model(info) -> Syntax<.Items> {
     schema_name = schema_name + "_"
   }
   let schema_type = syntax.ident(schema_name)
+  let native_decimal_alias = generated_local(info, "__orm_" + info.name + "_NativeDecimalCodec")
+  let native_bigdecimal_alias = generated_local(info, "__orm_" + info.name + "_BigDecimalCodec")
   let changes = syntax.ident(info.name + "Changes")
   let unchanged_alias = generated_local(info, "__orm_" + info.name + "_Unchanged")
   let patch_var = generated_local(info, "__orm_patch")
@@ -1187,17 +1375,18 @@ pub fn Model(info) -> Syntax<.Items> {
     |field| {
       let foreign = foreign_key_clause(field)
       if field.opts.generated {
-        return identifier(column_name(field)) + " INTEGER PRIMARY KEY" + foreign
+        return identifier(column_name(field)) + " INTEGER PRIMARY KEY AUTOINCREMENT" + foreign
       }
       let kind = field_kind(field)
-      let sql_type = match kind {
+      let precision = decimal_precision(field)
+      let sql_type = if numeric_decimal(field) { "DECIMAL({precision}, {field.opts.scale})" } else { match kind {
         "int" => "BIGINT",
         "str" => "TEXT",
         "float" => "DOUBLE PRECISION",
         "bool" => "BOOLEAN",
         "bytes" => "BLOB",
         _ => "TEXT",
-      }
+      } }
       let nullable = if field.type.is_optional { "" } else { " NOT NULL" }
       let primary = if keys.len() == 1 && key_names.contains(field.name) { " PRIMARY KEY" } else { "" }
       let unique = if field.opts.unique { " UNIQUE" } else { "" }
@@ -1217,7 +1406,7 @@ pub fn Model(info) -> Syntax<.Items> {
   let ddl = ddl_statements.join(";\n")
   let decode = info.fields.map(
     |field| {
-      let value = decode_field(field, info.name)
+      let value = decode_field(field, info)
       return quote member { ${field.member}: ${value}, }
     },
   )
@@ -1233,20 +1422,41 @@ pub fn Model(info) -> Syntax<.Items> {
     },
   )
   let encoders = info.fields.filter(|field| field_codec(field) != nil).map(|field| {
-    let codec = field_codec(field)
+    let reference = runtime_codec_ref(field, info)
     let method = syntax.ident("__orm_encode_" + field.name)
     let stored_type = storage_type(field)
+    let encoded = if numeric_decimal(field) {
+      quote expr { checked_decimal_storage(${reference}::encode(value), ${decimal_precision(field)}, ${field.opts.scale}) }
+    } else { quote expr { ${reference}::encode(value) } }
     if field.type.is_optional {
       return quote member {
         pub fn ${method}(value: ${field.type.ref}) -> ${stored_type}? {
           if value == nil { return nil }
-          return ${codec.ref}::encode(value)
+          return ${encoded}
         }
       }
     }
     return quote member {
       pub fn ${method}(value: ${field.type.ref}) -> ${stored_type} {
-        return ${codec.ref}::encode(value)
+        return ${encoded}
+      }
+    }
+  })
+  let query_encoders = info.fields.filter(|field| field_codec(field) != nil).map(|field| {
+    let reference = runtime_codec_ref(field, info)
+    let method = syntax.ident("__orm_query_encode_" + field.name)
+    let stored_type = storage_type(field)
+    if field.type.is_optional {
+      return quote member {
+        pub fn ${method}(value: ${field.type.ref}) -> ${stored_type}? {
+          if value == nil { return nil }
+          return ${reference}::encode(value)
+        }
+      }
+    }
+    return quote member {
+      pub fn ${method}(value: ${field.type.ref}) -> ${stored_type} {
+        return ${reference}::encode(value)
       }
     }
   })
@@ -1258,6 +1468,15 @@ pub fn Model(info) -> Syntax<.Items> {
     let value = encoded_value(field, schema_type, quote expr { insert.${field.member} })
     return quote expr { bind_value(params, ${value}) }
   })
+  let insert_parts = info.fields.map(|field| {
+    let value = encoded_value(field, schema_type, quote expr { insert.${field.member} })
+    let append = quote stmt {
+      names.push(${identifier(column_name(field))})
+      slots.push(bind_value(params, ${value}))
+    }
+    if field.opts.generated { return quote stmt { if insert.${field.member} != nil { ${append} } } }
+    return append
+  })
   let schema_fields = info.fields.map(
     |field| {
       let column = column_name(field)
@@ -1267,9 +1486,15 @@ pub fn Model(info) -> Syntax<.Items> {
   let schema_readers = info.fields.map(
     |field| {
       let reader = syntax.ident("read_" + field.name)
-      let value = decode_value(field, info.name, quote expr { row[column] })
+      let value = decode_value(field, info, quote expr { row[column] })
       let column = column_name(field)
+      let nullable_reader = syntax.ident("__orm_nullable_read_" + field.name)
+      let base_type = if field.type.is_optional { field.type.inner.ref } else { field.type.ref }
       return quote member {
+      pub fn ${nullable_reader}(row: Any, column: str) -> Result<${base_type}?, OrmError> {
+        if row[column] == nil { return Result::Ok(nil) }
+        return Result::Ok(${value})
+      }
       pub fn ${reader}(row: Any, column: str = ${column}) -> Result<${field.type.ref}, OrmError> {
         return Result::Ok(${value})
       }
@@ -1286,8 +1511,8 @@ pub fn Model(info) -> Syntax<.Items> {
       let order = syntax.ident("order_by_" + field.name)
       let column = column_name(field)
       let base_type = if field.type.is_optional { field.type.inner.ref } else { field.type.ref }
-      let value = encoded_value(field, schema_type, quote expr { value })
-      let ordering = if field_codec(field) == nil {
+      let value = query_encoded_value(field, schema_type, quote expr { value })
+      let ordering = if field_codec(field) == nil || numeric_decimal(field) {
         quote member {
           pub fn ${order}(self, descending: bool = false) -> ${query} {
             return ${query}.new(self.plan.order(${column}, descending))
@@ -1310,24 +1535,27 @@ pub fn Model(info) -> Syntax<.Items> {
     }
     },
   )
-  let ordered_fields = info.fields.filter(|field| field_kind(field) != "bool" && field_codec(field) == nil)
+  let ordered_fields = info.fields.filter(|field| field_kind(field) != "bool" && (field_codec(field) == nil || numeric_decimal(field)))
   let comparisons = ordered_fields.map(
     |field| {
       let greater = syntax.ident("where_" + field.name + "_gt")
       let less = syntax.ident("where_" + field.name + "_lt")
       let column = column_name(field)
       let base_type = if field.type.is_optional { field.type.inner.ref } else { field.type.ref }
+      let bound = query_encoded_value(field, schema_type, quote expr { value })
       return quote member {
       pub fn ${greater}(self, value: ${base_type}) -> ${query} {
-        return ${query}.new(self.plan.filter(#{op: "gt", column: ${column}}, [value]))
+        return ${query}.new(self.plan.filter(#{op: "gt", column: ${column}}, [${bound}]))
       }
       pub fn ${less}(self, value: ${base_type}) -> ${query} {
-        return ${query}.new(self.plan.filter(#{op: "lt", column: ${column}}, [value]))
+        return ${query}.new(self.plan.filter(#{op: "lt", column: ${column}}, [${bound}]))
       }
     }
     },
   )
-  let nonkeys = info.fields.filter(|field| !key_names.contains(field.name))
+  let nonkeys = info.fields.filter(|field| !immutable_names.contains(field.name))
+  let mutable_columns = nonkeys.map(|field| column_name(field))
+  let mutable_quoted_columns = mutable_columns.map(|column| identifier(column))
   let relations = info.fields.filter(|field| field.opts.belongs_to != nil).map(
     |field| {
       let parent_type = field.opts.belongs_to.ref
@@ -1411,7 +1639,21 @@ pub fn Model(info) -> Syntax<.Items> {
               return ${parent_type}::${parent_reader}(__orm_row, __orm_column)
             }
           })
+          let nullable_reader = syntax.ident(proxy_prefix + "__orm_nullable_read_" + field.name)
+          let parent_nullable_reader = syntax.ident("__orm_nullable_read_" + field.name)
+          join_proxies.push(quote member {
+            pub fn ${nullable_reader}(__orm_row: Any, __orm_column: str) {
+              return ${parent_type}::${parent_nullable_reader}(__orm_row, __orm_column)
+            }
+          })
           if field_codec(field) != nil {
+            let query_encoder = syntax.ident(proxy_prefix + "__orm_query_encode_" + field.name)
+            let parent_query_encoder = syntax.ident("__orm_query_encode_" + field.name)
+            join_proxies.push(quote member {
+              pub fn ${query_encoder}(__orm_value: Any) {
+                return ${parent_type}::${parent_query_encoder}(__orm_value)
+              }
+            })
             let encoder = syntax.ident(proxy_prefix + "__orm_encode_" + field.name)
             let parent_encoder = syntax.ident("__orm_encode_" + field.name)
             join_proxies.push(quote member {
@@ -1457,7 +1699,7 @@ pub fn Model(info) -> Syntax<.Items> {
             }
           } else { quote stmt { let right = ${parent_type}::from_row(right_row)? } }
           let ordering = []
-          for field in info.fields.filter(|field| field_codec(field) == nil) {
+          for field in info.fields.filter(|field| field_codec(field) == nil || numeric_decimal(field)) {
             let order = syntax.ident("order_by_left_" + field.name)
             let column = column_name(field)
             ordering.push(quote member {
@@ -1466,7 +1708,7 @@ pub fn Model(info) -> Syntax<.Items> {
               }
             })
           }
-          for field in parent.fields.filter(|field| field_codec(field) == nil) {
+          for field in parent.fields.filter(|field| field_codec(field) == nil || numeric_decimal(field)) {
             let order = syntax.ident("order_by_right_" + field.name)
             let column = reflected_column(field)
             ordering.push(quote member {
@@ -1481,15 +1723,15 @@ pub fn Model(info) -> Syntax<.Items> {
             pub fn ${method}(self) -> ${joined_type} {
               return ${joined_type}.new(self.plan.join(
                 ${parent_table}, ${mode}, ${column_name(relation)}, ${reference_column}, [${..joined_columns}],
-                [${..joined_page_keys}],
+                [${..joined_page_keys}], decimal: ${parent.fields.filter(|field| numeric_decimal(field)).len() > 0},
               ))
             }
           })
           let join_expressions = query_expression_methods(joined_type, [quote type { ${schema_type} }, row_type], syntax.ident("OrmError"), syntax.ident("Projection"))
           join_items.push(quote items {
             @sql_query(sources: [
-              #{schema: ${schema_name}, alias: "orm_l", reader_type: ${info.name}},
-              #{source: ${relation.opts.belongs_to.binding}, alias: "orm_r", reader_type: ${info.name}, reader: ${proxy_prefix + "read_"}, encoder_prefix: ${proxy_prefix}, nullable: ${optional}, presence: ${parent_key.name}},
+              #{schema: ${schema_name}, alias: "orm_l", reader_type: ${info.name}, numeric_reader: "__orm_nullable_read_"},
+              #{source: ${relation.opts.belongs_to.binding}, alias: "orm_r", reader_type: ${info.name}, reader: ${proxy_prefix + "read_"}, numeric_reader: ${proxy_prefix + "__orm_nullable_read_"}, encoder_prefix: ${proxy_prefix}, nullable: ${optional}, presence: ${parent_key.name}},
             ], filter: "filter_plan", select: "project", group_by: "group_plan", having: "having_plan", computed: "project_expr", scalar_reader: "__orm_scalar_", on: "on_plan")
             pub struct ${joined_type} { pub plan: QueryPlan, }
             impl ${joined_type} {
@@ -1686,7 +1928,7 @@ pub fn Model(info) -> Syntax<.Items> {
       let inspect = syntax.ident(target.method + "_statement")
       return quote member {
       /// Inspect the parameterized insert and explicit conflict update without executing it.
-      pub fn ${inspect}(insert: ${insert_type}, update: ${changes}) -> Statement {
+      pub fn ${inspect}(insert: ${insert_type}, update: ${changes}) -> Result<Statement, OrmError> {
         return ${schema_type}::__orm_upsert_statement(insert, update, ${target.columns})
       }
       /// Atomically insert or apply only the explicit patch on this unique conflict target.
@@ -1713,15 +1955,232 @@ pub fn Model(info) -> Syntax<.Items> {
     let value = encoded_value(field, schema_type, quote expr { self.${field.member} })
     return quote expr { ${identifier(column_name(field)) + " = "} + bind_value(params, ${value}) }
   })
-  let save = if nonkeys.len() == 0 { quote member {} } else {
-    quote member {
-    pub fn update(self, db: Database) -> Result<int, OrmError> {
-      let params: [Any] = []
-      let assignments = [${..update_values}]
-      for value in [${..self_keys}] { params.push(value) }
-      return Statement.new(${"UPDATE " + table + " SET "} + assignments.join(", ") + ${" WHERE " + key_where}, params).execute(db)
+  let update_revision = if revision == nil { quote stmt {} } else {
+    quote stmt {
+      if self.${revision.member} < 0 || self.${revision.member} == 9223372036854775807 {
+        return Result::Err(OrmError::UnsafeMutation("invalid or exhausted revision"))
+      }
+      assignments.push(${identifier(column_name(revision)) + " = " + identifier(column_name(revision)) + " + 1"})
     }
   }
+  let revision_params = if revision == nil { quote stmt {} } else { quote stmt { params.push(self.${revision.member}) } }
+  let update_where = key_where + if revision == nil { "" } else { " AND " + identifier(column_name(revision)) + " = ?" }
+  let update_result = if revision == nil { quote stmt { return Result::Ok(affected) } }
+    else { quote stmt { return MutationResult.new(affected).expect_one() } }
+  let save = if nonkeys.len() == 0 && revision == nil { quote member {} } else {
+    quote member {
+      pub fn update(self, db: Database) -> Result<int, OrmError> {
+        let params: [Any] = []
+        let assignments: [str] = [${..update_values}]
+        ${update_revision}
+        for value in [${..self_keys}] { params.push(value) }
+        ${revision_params}
+        let affected = Statement.new(${"UPDATE " + table + " SET "} + assignments.join(", ") + ${" WHERE " + update_where}, params, ${requires_decimal}).execute(db)?
+        ${update_result}
+      }
+    }
+  }
+  let revision_patch = if revision == nil { quote member {} } else {
+    quote member {
+      pub fn apply_if_version(self, db: Database, key: ${key_type}, expected: int) -> Result<int, OrmError> {
+        self.plan.validate_columns([${..mutable_quoted_columns}])?
+        return self.plan.apply_version(db, ${table}, [${..quoted_keys}], [${..key_values}], ${identifier(column_name(revision))}, expected, ${requires_decimal})
+      }
+    }
+  }
+  let apply_patch = if revision == nil {
+    quote stmt {
+      require_decimal_driver(db, ${requires_decimal})?
+      self.plan.validate_columns([${..mutable_quoted_columns}])?
+      return self.plan.apply_keys(db, ${table}, [${..quoted_keys}], [${..key_values}])
+    }
+  } else {
+    quote stmt {
+      let _ = self
+      let _ = db
+      let _ = key
+      return Result::Err(OrmError::UnsafeMutation("versioned patches require apply_if_version"))
+    }
+  }
+  let revision_bump = if revision == nil { quote stmt {} } else {
+    let column = column_name(revision)
+    quote stmt {
+      // Validate the caller predicate before an internal revision guard can hide a tautology.
+      self.plan.update_statement(assignments, bindings)?
+      let next: [Any] = assignments.map(|assignment| assignment)
+      next.push(#{column: ${column}, value: #{expr: "add", left: #{column: ${column}}, right: #{expr: "bind"}}})
+      let values: [Any] = bindings.map(|value| value)
+      values.push(1)
+      return self.plan.filter(#{op: "lt", column: ${column}}, [9223372036854775807]).update(db, next, values)
+    }
+  }
+  let changes_type = generated_local(info, "__orm_" + info.name + "_Change")
+  let field_change_type = generated_local(info, "__orm_" + info.name + "_FieldChange")
+  let field_changes = info.fields.map(|field| {
+    let old = query_encoded_value(field, schema_type, quote expr { before.${field.member} })
+    let new = query_encoded_value(field, schema_type, quote expr { after.${field.member} })
+    return quote stmt {
+      let old_value: Any = if before == nil { nil } else { ${old} }
+      let new_value: Any = if after == nil { nil } else { ${new} }
+      if old_value != new_value {
+        fields.push(${field_change_type}.new(${field.name},
+          if ${field.opts.redact} { nil } else { old_value },
+          if ${field.opts.redact} { nil } else { new_value }, ${field.opts.redact}))
+      }
+    }
+  })
+  let change_key_checks = info.fields.filter(|field| immutable_names.contains(field.name)).map(|field| quote stmt {
+    if before.${field.member} != after.${field.member} {
+      return Result::Err(OrmError::UnsafeMutation(${"changes cannot replace key, scope or revision: " + field.name}))
+    }
+  })
+  let change_update = if nonkeys.len() == 0 && revision == nil {
+    quote stmt { return Result::Ok(after) }
+  } else {
+    quote stmt {
+      let affected = after.update(tx.db())?
+      MutationResult.new(affected).expect_one()?
+      return Result::Ok(${info.ref}::find_or_error(tx.db(), after.key())?)
+    }
+  }
+  let transaction_type = generated_local(info, "__orm_" + info.name + "_Transaction")
+  let validation_type = generated_local(info, "__orm_" + info.name + "_ValidationErrors")
+  let lock_type = generated_local(info, "__orm_" + info.name + "_LockWait")
+  let repository = generated_local(info, info.name + "Repository")
+  let scope_type = generated_local(info, info.name + "Scope")
+  let scope_names = scoped_fields.map(|field| field.name)
+  let scoped_inputs = inputs.filter(|field| !scope_names.contains(field.name))
+  let scoped_create_params = scoped_inputs.map(|field| {
+    if field.has_default {
+      let method = syntax.ident("__orm_default_" + field.name)
+      return quote param { ${field.member}: ${field.type.ref} = ${schema_type}::${method}() }
+    }
+    if field.type.is_optional { return quote param { ${field.member}: ${field.type.ref} = nil } }
+    return quote param { ${field.member}: ${field.type.ref} }
+  })
+  let scoped_create_args = inputs.map(|field| {
+    if scope_names.contains(field.name) { return quote expr { self.scope.${field.member} } }
+    return quote expr { ${field.member} }
+  })
+  let scope_members = scoped_fields.map(|field| quote member { pub ${field.member}: ${field.type.ref}, })
+  let scope_params = scoped_fields.map(|field| quote param { ${field.member}: ${field.type.ref} })
+  let scope_values = scoped_fields.map(|field| quote expr { ${field.member} })
+  let scope_connection = generated_local(info, "__orm_scope_connection")
+  let scope_filters = scoped_fields.map(|field| quote stmt { plan = plan.equal(${column_name(field)}, self.scope.${field.member}) })
+  let scope_checks = scoped_fields.map(|field| quote stmt {
+    if value.${field.member} != self.scope.${field.member} {
+      return Result::Err(OrmError::ScopeViolation(${info.name + "." + field.name}))
+    }
+  })
+  let scope_columns = quoted_keys.map(|column| column)
+  let scope_keys = key_values.map(|value| value)
+  for field in scoped_fields {
+    scope_columns.push(identifier(column_name(field)))
+    scope_keys.push(quote expr { self.scope.${field.member} })
+  }
+  let scope_apply = if revision == nil {
+    quote member {
+      pub fn apply(self, key: ${key_type}, changes: ${changes}) -> Result<int, OrmError> {
+        self.check_patch(changes)?
+        require_decimal_driver(self.connection, ${requires_decimal})?
+        return changes.plan.apply_keys(self.connection, ${table}, [${..scope_columns}], [${..scope_keys}])
+      }
+    }
+  } else {
+    quote member {
+      pub fn apply_if_version(self, key: ${key_type}, changes: ${changes}, expected: int) -> Result<int, OrmError> {
+        self.check_patch(changes)?
+        return changes.plan.apply_version(self.connection, ${table}, [${..scope_columns}], [${..scope_keys}], ${identifier(column_name(revision))}, expected, ${requires_decimal})
+      }
+    }
+  }
+  let scope_setters = nonkeys.map(|field| {
+    let value = encoded_value(field, schema_type, quote expr { value.${field.member} })
+    return quote stmt { plan = plan.set(${identifier(column_name(field))}, ${value}) }
+  })
+  let scope_save = if revision == nil {
+    quote stmt { return self.apply(value.key(), ${changes}.new(plan)) }
+  } else {
+    quote stmt { return self.apply_if_version(value.key(), ${changes}.new(plan), value.${revision.member}) }
+  }
+  let scope_delete_params = [quote param { key: ${key_type} }]
+  if revision != nil { scope_delete_params.push(quote param { expected: int }) }
+  let scope_delete_version = if revision == nil { quote stmt {} } else {
+    quote stmt { params.push(expected) }
+  }
+  let scope_delete_sql = "DELETE FROM " + table + " WHERE " + scope_columns.map(|column| column + " = ?").join(" AND ")
+    + if revision == nil { "" } else { " AND " + identifier(column_name(revision)) + " = ?" }
+  let scope_items = if scoped_fields.len() == 0 { quote items {} } else {
+    quote items {
+      pub struct ${scope_type} { ${..scope_members} }
+      /// Explicit scoped repository. Raw model APIs are administrative escape hatches.
+      pub struct ${repository} {
+        connection: Database,
+        scope: ${scope_type},
+      }
+      impl ${repository} {
+        pub fn query(self) -> ${query} {
+          var plan = ${info.ref}::query().plan
+          ${..scope_filters}
+          return ${query}.new(plan)
+        }
+        pub fn find(self, key: ${key_type}) -> Result<${info.ref}?, OrmError> {
+          var plan = self.query().plan
+          ${..key_filters}
+          return ${query}.new(plan).first(self.connection)
+        }
+        pub fn find_or_error(self, key: ${key_type}) -> Result<${info.ref}, OrmError> {
+          let value = self.find(key)?
+          if value == nil { return Result::Err(OrmError::NotFound(${info.name})) }
+          return Result::Ok(value)
+        }
+        /// Scope fields come from the repository, not from an untrusted payload.
+        pub fn create(self, ${..scoped_create_params}) -> Result<${info.ref}, OrmError> {
+          return ${info.ref}::create(self.connection, ${..scoped_create_args})
+        }
+        pub fn all(self) -> Result<[${info.ref}], OrmError> { return self.query().all(self.connection) }
+        pub fn page(self, number: int = 1, size: int = 20) -> Result<${page_alias}<${info.ref}>, OrmError> {
+          return self.query().page(self.connection, number, size)
+        }
+        pub fn seek_page(self, size: int = 20, after: ${token_alias}? = nil) -> Result<${cursor_alias}<${info.ref}, ${token_alias}>, OrmError> {
+          return self.query().seek_page(self.connection, size, after)
+        }
+        pub fn count(self) -> Result<int, OrmError> { return self.query().count(self.connection) }
+        pub fn insert(self, value: ${info.ref}) -> Result<int, OrmError> {
+          ${..scope_checks}
+          return value.insert(self.connection)
+        }
+        pub fn insert_many(self, values: [${info.ref}], batch_size: int = 128) -> Result<int, OrmError> {
+          for value in values { ${..scope_checks} }
+          if self.connection.is_transaction() { return ${info.ref}::insert_many_in(self.connection, values, batch_size) }
+          return ${info.ref}::insert_many(self.connection, values, batch_size)
+        }
+        pub fn check_patch(self, changes: ${changes}) -> Result<bool, OrmError> {
+          return changes.plan.validate_columns([${..mutable_quoted_columns}])
+            .map_err(|error| OrmError::ScopeViolation("scoped changes require mutable columns and bound values"))
+        }
+        ${scope_apply}
+        pub fn update(self, value: ${info.ref}) -> Result<int, OrmError> {
+          ${..scope_checks}
+          var plan = UpdatePlan.new()
+          ${..scope_setters}
+          ${scope_save}
+        }
+        pub fn delete(self, ${..scope_delete_params}) -> Result<int, OrmError> {
+          let params: [Any] = [${..scope_keys}]
+          ${scope_delete_version}
+          let affected = Statement.new(${scope_delete_sql}, params).execute(self.connection)?
+          ${update_result}
+        }
+      }
+    }
+  }
+  let scope_factory = if scoped_fields.len() == 0 { quote member {} } else {
+    quote member {
+      pub fn scoped(${scope_connection}: Database, ${..scope_params}) -> ${repository} {
+        return ${repository}.new(${scope_connection}, ${scope_type}.new(${..scope_values}))
+      }
+    }
   }
   let cursor_method = if keys.len() == 1 && (field_kind(key) == "int" || field_kind(key) == "str") {
     quote member {
@@ -1749,7 +2208,14 @@ pub fn Model(info) -> Syntax<.Items> {
     use orm::QueryCursor as ${token_alias}
   }
   return quote items {
-    use orm::{QueryPlan, Statement, OrmError, bind_value, UpdatePlan, Projection, decoding_error}
+    use orm::{QueryPlan, Statement, OrmError, bind_value, UpdatePlan, Projection, decoding_error, MutationResult, require_decimal_driver, checked_decimal_storage}
+    use orm::Transaction as ${transaction_type}
+    use orm::ValidationErrors as ${validation_type}
+    use orm::NativeDecimalCodec as ${native_decimal_alias}
+    use orm::BigDecimalCodec as ${native_bigdecimal_alias}
+    use orm::LockWait as ${lock_type}
+    use orm::Change as ${changes_type}
+    use orm::FieldChange as ${field_change_type}
     use orm::Unchanged as ${unchanged_alias}
     use orm::invalid_patch_value as ${invalid_patch_alias}
     use orm::Row as ${row_alias}
@@ -1763,6 +2229,7 @@ pub fn Model(info) -> Syntax<.Items> {
     ${..reader_imports}
     ${..join_items}
     ${key_struct}
+    ${scope_items}
     use std::database::Database
     @sql_schema(table: ${table_name}, source: ${info.name}, ddl: ${ddl})
     pub struct ${schema_type} {
@@ -1770,22 +2237,35 @@ pub fn Model(info) -> Syntax<.Items> {
     }
     impl ${schema_type} {
       ${..encoders}
+      ${..query_encoders}
       ${..schema_readers}
       ${..default_thunks}
       pub fn __orm_empty_changes() -> ${changes} { return ${changes}.new(UpdatePlan.new()) }
 
       pub fn __orm_insert_statement(insert: ${insert_type}) -> Statement {
         let params: [Any] = []
-        let slots = [${..insert_values}]
-        return Statement.new(${insert_prefix} + "(" + slots.join(", ") + ")", params)
+        let names: [str] = []
+        let slots: [str] = []
+        ${..insert_parts}
+        if names.len() == 0 { return Statement.new(${"INSERT INTO " + table + " DEFAULT VALUES"}, params, ${requires_decimal}) }
+        return Statement.new(${"INSERT INTO " + table + " ("} + names.join(", ") + ") VALUES (" + slots.join(", ") + ")", params, ${requires_decimal})
       }
-      pub fn __orm_upsert_statement(insert: ${insert_type}, update: ${changes}, target: str) -> Statement {
+      pub fn __orm_upsert_statement(insert: ${insert_type}, update: ${changes}, target: str) -> Result<Statement, OrmError> {
+        if ${revision != nil} && update.plan.assignments.len() > 0 {
+          return Result::Err(OrmError::UnsafeMutation("versioned upsert cannot overwrite an unknown revision"))
+        }
+        update.plan.validate_columns([${..mutable_quoted_columns}])?
         let statement = ${schema_type}::__orm_insert_statement(insert)
+        // A model containing only an omitted generated key cannot name a conflict.
+        // SQLite disallows ON CONFLICT after DEFAULT VALUES; allocate a new row.
+        if statement.text == ${"INSERT INTO " + table + " DEFAULT VALUES"} {
+          return Result::Ok(Statement.new(statement.text + ${returning}, statement.params, ${requires_decimal}))
+        }
         let action = update.plan.conflict_clause(statement.params)
-        return Statement.new(statement.text + " ON CONFLICT (" + target + ") " + action + ${returning}, statement.params)
+        return Result::Ok(Statement.new(statement.text + " ON CONFLICT (" + target + ") " + action + ${returning}, statement.params, ${requires_decimal}))
       }
       pub fn __orm_upsert(db: Database, insert: ${insert_type}, update: ${changes}, target: str) -> Result<${info.ref}?, OrmError> {
-        let rows = ${schema_type}::__orm_upsert_statement(insert, update, target).query(db)?
+        let rows = ${schema_type}::__orm_upsert_statement(insert, update, target)?.query(db)?
         if rows.len() == 0 && update.plan.assignments.len() == 0 { return Result::Ok(nil) }
         if rows.len() != 1 { return Result::Err(OrmError::Decode("upsert expected one returned row")) }
         let value = ${info.ref}::from_row(rows[0])?
@@ -1798,7 +2278,7 @@ pub fn Model(info) -> Syntax<.Items> {
         return ${info.ref}::from_row(${rows_var}[0])
       }
     }
-    /// Inputs for atomic upsert; a nil generated integer key asks SQLite to allocate one.
+    /// Inputs for atomic upsert; a nil generated integer key asks the database to allocate one.
     pub struct ${insert_type} {
       ${..insert_fields}
     }
@@ -1807,15 +2287,62 @@ pub fn Model(info) -> Syntax<.Items> {
     }
     impl ${changes} {
       ${..setters}
+      ${revision_patch}
       pub fn apply(self, db: Database, key: ${key_type}) -> Result<int, OrmError> {
-        return self.plan.apply_keys(db, ${table}, [${..quoted_keys}], [${..key_values}])
+        ${apply_patch}
       }
     }
-    @sql_query(schema: ${schema_name}, filter: "filter_plan", select: "project", group_by: "group_plan", having: "having_plan", computed: "project_expr", scalar_reader: "__orm_scalar_", reader: "read_", reader_type: ${info.name})
+    @sql_query(schema: ${schema_name}, filter: "filter_plan", select: "project", group_by: "group_plan", having: "having_plan", computed: "project_expr", scalar_reader: "__orm_scalar_", reader: "read_", reader_type: ${info.name}, update: "update_plan", immutable: ${immutable_names}, numeric_reader: "__orm_nullable_read_")
     pub struct ${query} {
       pub plan: QueryPlan,
     }
     impl ${query} {
+      /// Capture an atomic conditional update; keys are immutable.
+      pub fn update<R>(self, db: Database, assignments: fn(${schema_type}) -> R) -> Result<MutationResult, OrmError> {
+        let _ = db
+        let _ = assignments
+        panic("orm: update expression was not compiled")
+      }
+      pub fn update_plan(self, db: Database, assignments: [Any], bindings: [Any]) -> Result<MutationResult, OrmError> {
+        if self.plan.filters == nil { return Result::Err(OrmError::UnsafeMutation("update requires a filter")) }
+        if assignments.len() == 0 { return Result::Err(OrmError::UnsafeMutation("update requires at least one assignment")) }
+        for assignment in assignments {
+          if ![${..mutable_columns}].contains(assignment.column) {
+            return Result::Err(OrmError::UnsafeMutation("update requires mutable model columns; keys, scope and revision are immutable"))
+          }
+        }
+        ${revision_bump}
+        return self.plan.update(db, assignments, bindings)
+      }
+      pub fn update_statement(self, assignments: [Any], bindings: [Any]) -> Result<Statement, OrmError> {
+        if ${revision != nil} { return Result::Err(OrmError::UnsafeMutation("inspect versioned writes through their explicit revision plan")) }
+        for assignment in assignments {
+          if ![${..mutable_columns}].contains(assignment.column) { return Result::Err(OrmError::UnsafeMutation("update requires mutable model columns; keys, scope and revision are immutable")) }
+        }
+        return self.plan.update_statement(assignments, bindings)
+      }
+      /// Row locks require an active transaction and an explicit wait policy.
+      pub fn locked(self, tx: ${transaction_type}, wait: ${lock_type} = .Wait) -> Result<[${info.ref}], OrmError> {
+        tx.require_active()?
+        let mode = match wait { .Wait => "update", .NoWait => "update_nowait", .SkipLocked => "update_skip_locked" }
+        let rows = self.plan.try_statement("select", mode)?.query(tx.db())?
+        let values: [${info.ref}] = []
+        for row in rows { values.push(${info.ref}::from_row(row)?) }
+        return Result::Ok(values)
+      }
+      /// Process bounded keyset pages; this is chunking, not a driver stream.
+      pub fn each_chunk(self, db: Database, visit: fn([${info.ref}]) -> Result<bool, OrmError>, size: int = 256) -> Result<int, OrmError> {
+        var cursor: ${token_alias}? = nil
+        var total = 0
+        while true {
+          let page = self.seek_page(db, size, cursor)?
+          if page.items.len() == 0 { return Result::Ok(total) }
+          total += page.items.len()
+          if !visit(page.items)? || !page.has_next { return Result::Ok(total) }
+          cursor = page.next_cursor
+        }
+        return Result::Ok(total)
+      }
       ${..query_methods}
       ${..comparisons}
       ${..join_methods}
@@ -1881,12 +2408,42 @@ pub fn Model(info) -> Syntax<.Items> {
       pub fn delete(self, db: Database) -> Result<int, OrmError> { return self.plan.delete(db) }
     }
     impl ${info.ref} {
+      ${scope_factory}
       ${..join_proxies}
       ${..encoders}
+      ${..query_encoders}
       ${..schema_readers}
       ${..scalar_methods}
+      /// Validate before I/O, then persist under the caller's transaction.
+      /// Versioned updates/deletes compare the original revision.
+      pub fn write_change(
+        tx: ${transaction_type}, change: ${changes_type}<${info.ref}>,
+        validate: fn(${changes_type}<${info.ref}>, ${validation_type}) -> nil,
+      ) -> Result<${info.ref}?, OrmError> {
+        tx.require_active()?
+        let checked = ${info.ref}::change(change.before, change.after).validate(validate)?
+        let before = checked.before
+        let after = checked.after
+        if before == nil && after == nil { return Result::Err(OrmError::UnsafeMutation("change requires a before or after value")) }
+        if after == nil {
+          let affected = before.delete(tx.db())?
+          MutationResult.new(affected).expect_one()?
+          return Result::Ok(nil)
+        }
+        if before == nil {
+          after.insert(tx.db())?
+          return Result::Ok(${info.ref}::find_or_error(tx.db(), after.key())?)
+        }
+        ${..change_key_checks}
+        ${change_update}
+      }
+      pub fn change(before: ${info.ref}?, after: ${info.ref}?) -> ${changes_type}<${info.ref}> {
+        let fields: [${field_change_type}] = []
+        ${..field_changes}
+        return ${changes_type}.new(before, after, fields)
+      }
       pub fn key(self) -> ${key_type} { return ${key_expr} }
-      pub fn query() -> ${query} { return ${query}.new(QueryPlan.new(${table_name}, [${..column_names}], page_keys: [${..key_columns}], source: ${info.name})) }
+      pub fn query() -> ${query} { return ${query}.new(QueryPlan.new(${table_name}, [${..column_names}], page_keys: [${..key_columns}], source: ${info.name}, requires_decimal: ${requires_decimal})) }
       pub fn changes(${..change_params}) -> ${changes} {
         var ${patch_var} = ${schema_type}::__orm_empty_changes()
         ${..change_assignments}
@@ -1898,12 +2455,13 @@ pub fn Model(info) -> Syntax<.Items> {
       pub fn create(${connection_var}: Database, ${..create_params}) -> Result<${info.ref}, OrmError> {
         let ${bindings_var}: [Any] = []
         let ${slots_var}: [str] = [${..create_slots}]
-        let ${rows_var} = ${statement_alias}.new(${create_sql}, ${bindings_var}).query(${connection_var})?
+        let ${rows_var} = ${statement_alias}.new(${create_sql}, ${bindings_var}, ${requires_decimal}).query(${connection_var})?
         return ${schema_type}::__orm_decode_created(${rows_var})
       }
       pub fn schema_sql() -> str { return ${ddl} }
       pub fn schema_statements() -> [str] { return [${..ddl_statements}] }
       pub fn create_table(db: Database) -> Result<int, OrmError> {
+        require_decimal_driver(db, ${requires_decimal})?
         var affected = 0
         for ddl in ${info.ref}::schema_statements() { affected = affected + Statement.new(ddl, []).execute(db)? }
         return Result::Ok(affected)
@@ -1914,13 +2472,14 @@ pub fn Model(info) -> Syntax<.Items> {
       /// Escape hatch for SQL joins/projections with the model's full columns.
       /// The SQL literal still receives Zolo's existing syntax validation.
       pub fn from_sql(db: Database, query: SQL) -> Result<[${info.ref}], OrmError> {
+        require_decimal_driver(db, ${requires_decimal})?
         let rows = query.query(db).map_err(|e| OrmError::Database(e))?
         let values: [${info.ref}] = []
         for row in rows { values.push(${info.ref}::from_row(row)?) }
         return Result::Ok(values)
       }
       pub fn find(db: Database, key: ${key_type}) -> Result<${info.ref}?, OrmError> {
-        var plan = QueryPlan.new(${table_name}, [${..column_names}], page_keys: [${..key_columns}], source: ${info.name})
+        var plan = QueryPlan.new(${table_name}, [${..column_names}], page_keys: [${..key_columns}], source: ${info.name}, requires_decimal: ${requires_decimal})
         ${..key_filters}
         return ${query}.new(plan).first(db)
       }
@@ -1933,7 +2492,7 @@ pub fn Model(info) -> Syntax<.Items> {
       pub fn insert_statement(self) -> Statement {
         let params: [Any] = []
         let row = self.bind_row(params)
-        return Statement.new(${insert_prefix} + row, params)
+        return Statement.new(${insert_prefix} + row, params, ${requires_decimal})
       }
       /// Append this row's non-null values to a batch binding buffer.
       pub fn bind_row(self, params: [Any]) -> str {
@@ -1963,14 +2522,17 @@ pub fn Model(info) -> Syntax<.Items> {
             let params: [Any] = []
             let rows: [str] = []
             for index in start..end { rows.push(items[index].bind_row(params)) }
-            affected = affected + Statement.new(${insert_prefix} + rows.join(", "), params).execute(tx)?
+            affected = affected + Statement.new(${insert_prefix} + rows.join(", "), params, ${requires_decimal}).execute(tx)?
             start = end
           }
           return Result::Ok(affected)
       }
       ${save}
       pub fn delete(self, db: Database) -> Result<int, OrmError> {
-        return Statement.new(${"DELETE FROM " + table + " WHERE " + key_where}, [${..self_keys}]).execute(db)
+        let params: [Any] = [${..self_keys}]
+        ${revision_params}
+        let affected = Statement.new(${"DELETE FROM " + table + " WHERE " + update_where}, params).execute(db)?
+        ${update_result}
       }
       pub fn delete_all(db: Database) -> Result<int, OrmError> {
         return Statement.new(${"DELETE FROM " + table}, []).execute(db)
@@ -2089,7 +2651,7 @@ pub fn Query(info) -> Syntax<.Items> {
     let proxy_prefix = "__orm_s{ordinal}_"
     sources.push(quote expr {
       #{source: ${logical_type.name}, alias: ${alias}, reader_type: ${info.name},
-        reader: ${proxy_prefix + "read_"}, encoder_prefix: ${proxy_prefix},
+        reader: ${proxy_prefix + "read_"}, numeric_reader: ${proxy_prefix + "__orm_nullable_read_"}, encoder_prefix: ${proxy_prefix},
         nullable: ${source.type.is_optional}, presence: ${key.name}}
     })
     for field in keys { page_keys.push(quote expr { #{table: ${alias}, column: ${reflected_column(field)}} }) }
@@ -2108,7 +2670,21 @@ pub fn Query(info) -> Syntax<.Items> {
           return ${logical_type.ref}::${model_reader}(__orm_row, __orm_column)
         }
       })
+      let nullable_reader = syntax.ident(proxy_prefix + "__orm_nullable_read_" + field.name)
+      let model_nullable_reader = syntax.ident("__orm_nullable_read_" + field.name)
+      proxies.push(quote member {
+        pub fn ${nullable_reader}(__orm_row: Any, __orm_column: str) {
+          return ${logical_type.ref}::${model_nullable_reader}(__orm_row, __orm_column)
+        }
+      })
       if field_codec(field) != nil {
+        let query_encoder = syntax.ident(proxy_prefix + "__orm_query_encode_" + field.name)
+        let model_query_encoder = syntax.ident("__orm_query_encode_" + field.name)
+        proxies.push(quote member {
+          pub fn ${query_encoder}(__orm_value: Any) {
+            return ${logical_type.ref}::${model_query_encoder}(__orm_value)
+          }
+        })
         let encoder = syntax.ident(proxy_prefix + "__orm_encode_" + field.name)
         let model_encoder = syntax.ident("__orm_encode_" + field.name)
         proxies.push(quote member {
@@ -2122,7 +2698,7 @@ pub fn Query(info) -> Syntax<.Items> {
       columns.push(quote expr { #{table: ${alias}, column: ${column}, alias: ${output_alias}} })
       copies.push(quote stmt { ${raw}[${column}] = row[${output_alias}] })
       if field.name == key.name { presence_alias = output_alias }
-      if field_codec(field) == nil {
+      if field_codec(field) == nil || numeric_decimal(field) {
         let order_name = "order_by_" + source.name + "_" + field.name
         if order_names.contains(order_name) { panic("orm: generated query ordering method collision: " + order_name) }
         order_names.push(order_name)
@@ -2248,7 +2824,7 @@ pub fn Query(info) -> Syntax<.Items> {
       pub fn query() -> ${query} {
         return ${query}.new(${plan_type}.new(
           ${tables[0]}, [${..columns}], alias: ${aliases[0]}, joins: [${..joins}],
-          page_keys: [${..page_keys}], source: ${info.name},
+          page_keys: [${..page_keys}], source: ${info.name}, requires_decimal: ${models.filter(|model| model.fields.filter(|field| numeric_decimal(field)).len() > 0).len() > 0},
         ))
       }
       pub fn from_row(row: Any) -> Result<${info.ref}, ${error_type}> {

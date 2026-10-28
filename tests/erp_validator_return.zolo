@@ -1,0 +1,4 @@
+use erp_models::Stock
+use orm::OrmError
+let change = Stock::change(nil, Stock.new(1, 1, 1, 0))
+change.validate(|value, errors| Result::Err(OrmError::UnsafeMutation("must not be ignored")))

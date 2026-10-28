@@ -59,12 +59,17 @@ database. Follow its commands to generate, inspect, apply, check and roll back
 a migration, then run an application that does not create its own tables.
 Its repeated upsert keeps one demo row.
 
+The three ERP examples below are new regression sources and have not been compiled or run in this development batch.
+
 ## Explore a specific contract
 
 From `examples/`, run `zolo run <file>.zolo --no-cache`.
 
 | Program | What it demonstrates |
 | --- | --- |
+| [erp_concurrency.zolo](erp_concurrency.zolo) | Conditional stock reservation, revisions, company scope, CASE/coalesce and bounded chunks. |
+| [erp_workflows.zolo](erp_workflows.zolo) | Explicit validation, audit redaction, transactional outbox, rollback and counters. |
+| [decimal_math.zolo](decimal_math.zolo) | Exact arithmetic, rounding and rejecting unsafe SQLite numeric storage. |
 | [aggregates.zolo](aggregates.zolo) | Computed selections, empty aggregates, grouped totals and group-aware pages. |
 | [advanced_cursors.zolo](advanced_cursors.zolo) | Mixed directions, NULL ordering, hidden projection keys and joined continuation. |
 | [builtin_codecs.zolo](builtin_codecs.zolo) | Validated dates/UTC timestamps, exact decimals and real binary storage. |
@@ -175,3 +180,16 @@ nominal-type support described in [compatibility](../docs/errors-and-compatibili
 
 These new regression sources are written and cataloged; execution validation of
 the current development batch is pending.
+
+## Manual PostgreSQL fixture
+
+[postgres_erp.zolo](postgres_erp.zolo) exports `verify_postgres_erp(db)` for an
+empty, disposable PostgreSQL database. It covers generated IDs, scoped creation,
+exact decimal roundtrips/aggregates/arithmetic, revision conflicts and row locks.
+It has no top-level connection and is not included in the ordinary example
+runners. This new fixture has not been compiled or executed.
+
+[native_decimal_models.zolo](native_decimal_models.zolo) contains imported models
+using native `decimal`/`bigdecimal` with automatic codecs and explicit Text
+storage. [decimal_math.zolo](decimal_math.zolo) exercises language arithmetic,
+parsing/rounding, compatibility conversions and persistence contracts in source.

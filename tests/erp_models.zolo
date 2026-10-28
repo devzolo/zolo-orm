@@ -1,0 +1,10 @@
+use orm::Model
+@derive(Model)
+@model(primary_key: [Stock.company, Stock.id], scope: [Stock.company])
+pub struct Stock {
+  pub company: int,
+  pub id: int,
+  pub quantity: int,
+  @model(version: true)
+  pub revision: int = 0,
+}

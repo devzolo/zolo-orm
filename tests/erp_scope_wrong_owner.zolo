@@ -1,0 +1,9 @@
+use orm::Model
+struct Foreign { company: int }
+@derive(Model)
+@model(scope: [Foreign.company])
+struct Invalid {
+  @model(primary_key: true)
+  id: int,
+  company: int,
+}

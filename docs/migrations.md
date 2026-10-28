@@ -6,6 +6,11 @@ Migrations turn model changes into reviewed SQL and keep an applied history.
 Use them for persistent databases; `create_table` only creates missing objects
 and does not reconcile changes to an existing table or index.
 
+The walkthrough below uses SQLite. The ERP development branch also contains
+PostgreSQL migration planning, catalog checks and transaction locking in source;
+compilation and server integration validation are pending. MySQL migration
+execution is not implemented.
+
 ## Configure a schema entry
 
 The [demo manifest](../examples/migration_demo/zolo.toml) separates the schema
@@ -136,7 +141,7 @@ The [migration demo](../examples/migration_demo/README.md#preserve-data-through-
 includes an alternate model and a read-only program that checks the same row
 before migration, after migration and after rollback.
 
-## Supported changes and explicit boundaries
+## SQLite supported changes and explicit boundaries
 
 | Change | Behavior |
 | --- | --- |
@@ -173,4 +178,21 @@ constraints and recreate supported indexes after copying rows.
 
 Scripts must not contain `BEGIN`, `COMMIT`, `ROLLBACK` or other
 transaction-control statements: the runner owns the transaction around SQL
-and history updates. Migration execution currently certifies SQLite.
+and history updates. Earlier executable validation covers SQLite; the new
+PostgreSQL implementation has only been inspected statically in this batch.
+
+## PostgreSQL source implementation
+
+Set `dialect = "postgres"` and use a PostgreSQL URL for the same
+`generate/status/migrate/check/rollback/baseline` workflow. PostgreSQL plans use
+direct ALTER TABLE operations and preserve explicit identities and
+`DECIMAL(precision, scale)`. Foreign-key cycles are handled by adding constraints
+after creating their tables. Applied SQL and migration history share a dedicated
+transaction and an advisory lock; migration connections must not use pool options.
+
+PostgreSQL does not use `--allow-rebuild`. Unsupported catalog objects, custom
+constraint names that do not match the generated plan, and schema details absent
+from the snapshot are refused. Review generated up/down SQL and data conversion
+semantics before applying it. The current driver uses `NoTls`; required TLS is
+rejected rather than silently downgraded. This support still requires compiled
+and disposable-server validation before use with application data.

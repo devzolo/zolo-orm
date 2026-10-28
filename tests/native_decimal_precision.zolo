@@ -1,0 +1,8 @@
+use orm::Model
+@derive(Model)
+struct TooWide {
+  @model(primary_key: true)
+  id: int,
+  @model(precision: 38)
+  amount: decimal,
+}

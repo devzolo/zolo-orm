@@ -1,0 +1,234 @@
+//! Explicit contracts for transactional business operations.
+use std::database::Database
+use std::json
+use crate::{OrmError, Statement, read_int}
+
+pub struct MutationResult { pub affected: int }
+impl MutationResult {
+  pub fn expect_one(self) -> Result<int, OrmError> {
+    if self.affected != 1 { return Result::Err(OrmError::Conflict(self.affected)) }
+    return Result::Ok(self.affected)
+  }
+  pub fn changed(self) -> bool { return self.affected > 0 }
+}
+
+/// Context is supplied by the application, never inferred from a global user.
+pub struct Actor {
+  pub id: str,
+  pub request_id: str,
+}
+
+/// A callback-scoped handle. The database bridge invalidates it on completion.
+pub struct Transaction {
+  connection: Database,
+  pub actor: Actor?,
+}
+impl Transaction {
+  pub fn wrap(db: Database, actor: Actor? = nil) -> Result<Transaction, OrmError> {
+    if !db.is_transaction() { return Result::Err(OrmError::UnsafeMutation("an active transaction is required")) }
+    return Result::Ok(Transaction.new(db, actor))
+  }
+  pub fn db(self) -> Database { return self.connection }
+  pub fn require_active(self) -> Result<bool, OrmError> {
+    if !self.connection.is_transaction() { return Result::Err(OrmError::UnsafeMutation("transaction has already completed")) }
+    return Result::Ok(true)
+  }
+  /// An event is persisted in the same transaction. Payloads must be JSON.
+  pub fn emit(self, event: OutboxEvent) -> Result<int, OrmError> {
+    self.require_active()?
+    if event.id == "" || event.topic == "" || event.aggregate == "" {
+      return Result::Err(OrmError::UnsafeMutation("outbox id, topic and aggregate must not be empty"))
+    }
+    let _, json_error = json.decode(event.payload)
+    if json_error != nil { return Result::Err(OrmError::UnsafeMutation("outbox payload must be valid JSON")) }
+    return Statement.new(
+      "INSERT INTO \"zolo_outbox\" (\"id\", \"topic\", \"aggregate\", \"payload\") VALUES (?, ?, ?, ?)",
+      [event.id, event.topic, event.aggregate, event.payload],
+    ).execute(self.connection)
+  }
+  /// The application chooses an audit key and serializes only approved fields.
+  pub fn audit(self, entry: AuditEntry) -> Result<int, OrmError> {
+    self.require_active()?
+    let actor = self.actor
+    if actor == nil { return Result::Err(OrmError::UnsafeMutation("audit requires an explicit actor")) }
+    if entry.id == "" || entry.model == "" || entry.key == "" {
+      return Result::Err(OrmError::UnsafeMutation("audit id, model and key must not be empty"))
+    }
+    let _, json_error = json.decode(entry.changes)
+    if json_error != nil { return Result::Err(OrmError::UnsafeMutation("audit changes must be valid JSON")) }
+    return Statement.new(
+      "INSERT INTO \"zolo_audit\" (\"id\", \"model\", \"record_key\", \"operation\", \"actor\", \"request_id\", \"changes\") VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [entry.id, entry.model, entry.key, entry.operation, actor.id, actor.request_id, entry.changes],
+    ).execute(self.connection)
+  }
+  /// Allocate business numbering by a caller-defined company/series key.
+  /// Allocation rolls back with the business transaction; never use for identity.
+  pub fn next_number(self, key: str) -> Result<int, OrmError> {
+    self.require_active()?
+    if key == "" { return Result::Err(OrmError::UnsafeMutation("sequence key must not be empty")) }
+    if self.connection.driver() != "postgres" && self.connection.driver() != "sqlite" {
+      return Result::Err(OrmError::Unsupported("transactional counters require PostgreSQL or SQLite RETURNING"))
+    }
+    let rows = Statement.new(
+      "INSERT INTO \"zolo_counters\" (\"key\", \"value\") VALUES (?, 1) ON CONFLICT (\"key\") DO UPDATE SET \"value\" = \"zolo_counters\".\"value\" + 1 WHERE \"zolo_counters\".\"value\" < 9223372036854775807 RETURNING \"value\"",
+      [key],
+    ).query(self.connection)?
+    if rows.len() != 1 { return Result::Err(OrmError::UnsafeMutation("business counter exhausted")) }
+    return read_int(rows[0]["value"], "value", "zolo_counters")
+  }
+}
+
+/// One Result layer; errors and panics roll back changes and queued events.
+pub fn transact<T>(db: Database, body: fn(Transaction) -> Result<T, OrmError>, actor: Actor? = nil) -> Result<T, OrmError> {
+  let result = db.transaction(|connection| -> Result<T, OrmError> {
+    return body(Transaction::wrap(connection, actor)?)
+  }).map_err(|error| OrmError::Database(error))?
+  return result
+}
+
+pub struct FieldError {
+  /// Paths such as items[2].quantity are meaningful to the application.
+  pub path: str,
+  pub code: str,
+  pub message: str,
+}
+pub struct ValidationErrors { pub fields: [FieldError] = [] }
+impl ValidationErrors {
+  pub fn add(self, path: str, code: str, message: str) -> nil {
+    self.fields.push(FieldError.new(path, code, message))
+    return nil
+  }
+  pub fn require(self, condition: bool, path: str, code: str, message: str) -> nil {
+    if !condition { self.add(path, code, message) }
+    return nil
+  }
+  pub fn finish(self) -> Result<bool, OrmError> {
+    if self.fields.len() > 0 { return Result::Err(OrmError::Validation(self)) }
+    return Result::Ok(true)
+  }
+}
+pub struct FieldChange {
+  pub field: str,
+  pub before: Any,
+  pub after: Any,
+  pub redacted: bool = false,
+}
+/// Explicit before/after data. Validation never performs a hidden database write.
+pub struct Change<T> {
+  pub before: T?,
+  pub after: T?,
+  pub fields: [FieldChange],
+}
+impl Change<T> {
+  pub fn changed(self, field: str) -> bool { return self.fields.filter(|item| item.field == field).len() > 0 }
+  pub fn validate(self, check: fn(Change<T>, ValidationErrors) -> nil) -> Result<Change<T>, OrmError> {
+    let errors = ValidationErrors.new()
+    let returned: Any = check(self, errors)
+    if returned != nil { return Result::Err(OrmError::UnsafeMutation("validator must record field errors and return nil")) }
+    errors.finish()?
+    return Result::Ok(self)
+  }
+  /// Explicit allowlist: sensitive fields are absent unless selected.
+  pub fn audit_json(self, include: [str]) -> str {
+    let changes: [Any] = []
+    for field in self.fields {
+      if include.contains(field.field) && !field.redacted {
+        changes.push(#{field: field.field, before: field.before, after: field.after})
+      }
+    }
+    return json.encode(changes)
+  }
+}
+pub struct AuditEntry {
+  pub id: str,
+  pub model: str,
+  pub key: str,
+  pub operation: str,
+  pub changes: str,
+}
+pub struct OutboxEvent {
+  /// Globally unique application-assigned identifier; duplicate insertion fails.
+  pub id: str,
+  pub topic: str,
+  pub aggregate: str,
+  pub payload: str,
+}
+impl OutboxEvent {
+  pub fn json<T>(id: str, topic: str, aggregate: str, value: T) -> OutboxEvent {
+    return OutboxEvent.new(id, topic, aggregate, json.encode(value))
+  }
+}
+
+/// Schema is explicit and migration-friendly. No tables are created by emit/audit.
+pub fn infrastructure_schema() -> [str] {
+  return [
+    "CREATE TABLE IF NOT EXISTS \"zolo_outbox\" (\"id\" TEXT PRIMARY KEY NOT NULL, \"topic\" TEXT NOT NULL, \"aggregate\" TEXT NOT NULL, \"payload\" TEXT NOT NULL, \"created_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \"delivered_at\" TIMESTAMP NULL)",
+    "CREATE INDEX IF NOT EXISTS \"zolo_outbox_pending\" ON \"zolo_outbox\" (\"created_at\", \"id\") WHERE \"delivered_at\" IS NULL",
+    "CREATE TABLE IF NOT EXISTS \"zolo_audit\" (\"id\" TEXT PRIMARY KEY NOT NULL, \"model\" TEXT NOT NULL, \"record_key\" TEXT NOT NULL, \"operation\" TEXT NOT NULL, \"actor\" TEXT NOT NULL, \"request_id\" TEXT NOT NULL, \"changes\" TEXT NOT NULL, \"created_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    "CREATE TABLE IF NOT EXISTS \"zolo_counters\" (\"key\" TEXT PRIMARY KEY NOT NULL, \"value\" BIGINT NOT NULL CHECK (\"value\" > 0))",
+  ]
+}
+pub fn create_infrastructure(db: Database) -> Result<int, OrmError> {
+  if db.driver() != "postgres" && db.driver() != "sqlite" {
+    return Result::Err(OrmError::Unsupported("infrastructure schema creation supports PostgreSQL and SQLite"))
+  }
+  return crate::transaction(db, |tx| -> Result<int, OrmError> {
+    var count = 0
+    for ddl in infrastructure_schema() { count += Statement.new(ddl, []).execute(tx)? }
+    return Result::Ok(count)
+  })
+}
+
+/// Read a bounded batch. Multiple publishers may deliver a record more than once.
+/// Consumers must deduplicate by id; no automatic network effects occur here.
+pub fn pending_events(db: Database, limit: int = 100) -> Result<[OutboxEvent], OrmError> {
+  if limit < 1 || limit > 10000 { return Result::Err(OrmError::UnsafeMutation("outbox batch must be between 1 and 10000")) }
+  let rows = Statement.new(
+    "SELECT \"id\", \"topic\", \"aggregate\", \"payload\" FROM \"zolo_outbox\" WHERE \"delivered_at\" IS NULL ORDER BY \"created_at\", \"id\" LIMIT ?", [limit],
+  ).query(db)?
+  let result: [OutboxEvent] = []
+  for row in rows {
+    result.push(OutboxEvent.new(
+      crate::read_str(row["id"], "id")?, crate::read_str(row["topic"], "topic")?,
+      crate::read_str(row["aggregate"], "aggregate")?, crate::read_str(row["payload"], "payload")?,
+    ))
+  }
+  return Result::Ok(result)
+}
+pub fn acknowledge_event(db: Database, id: str) -> Result<int, OrmError> {
+  return Statement.new(
+    "UPDATE \"zolo_outbox\" SET \"delivered_at\" = CURRENT_TIMESTAMP WHERE \"id\" = ? AND \"delivered_at\" IS NULL", [id],
+  ).execute(db)
+}
+
+/// A collection edit is a proposal, not an implicit cascading save/delete.
+pub struct CollectionDiff<T> {
+  pub added: [T],
+  pub kept: [T],
+  pub removed: [T],
+}
+pub fn diff_collection<T, K>(before: [T], after: [T], key: fn(T) -> K) -> Result<CollectionDiff<T>, OrmError> {
+  let old_keys = before.map(key)
+  let new_keys = after.map(key)
+  for keys in [old_keys, new_keys] {
+    for index in 0..keys.len() {
+      var other = index + 1
+      while other < keys.len() {
+        if keys[index] == keys[other] { return Result::Err(OrmError::UnsafeMutation("collection contains duplicate keys")) }
+        other += 1
+      }
+    }
+  }
+  let added = after.filter(|item| !old_keys.contains(key(item)))
+  let kept = after.filter(|item| old_keys.contains(key(item)))
+  let removed = before.filter(|item| !new_keys.contains(key(item)))
+  return Result::Ok(CollectionDiff.new(added, kept, removed))
+}
+
+/// Typed decoder for parameterized SQL beyond the captured query vocabulary.
+pub fn query_rows<T>(db: Database, statement: Statement, decode: fn(Any) -> Result<T, OrmError>) -> Result<[T], OrmError> {
+  let rows = statement.query(db)?
+  let result: [T] = []
+  for row in rows { result.push(decode(row)?) }
+  return Result::Ok(result)
+}

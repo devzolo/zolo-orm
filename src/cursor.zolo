@@ -64,11 +64,22 @@ fn column_id(column: Any, default_table: str) -> Result<str, str> {
 }
 
 pub fn contains_aggregate(column: Any) -> bool {
-  if column is str { return false }
+  if column == nil || column is str { return false }
   let kind = column.expr as? str
-  if kind == nil { return false }
-  if ["count", "count_value", "sum", "avg", "min", "max"].contains(kind) { return true }
-  if kind == "add" || kind == "sub" || kind == "mul" || kind == "div" {
+  if kind != nil && ["count", "count_value", "sum", "avg", "min", "max"].contains(kind) { return true }
+  if kind == "add" || kind == "sub" || kind == "mul" || kind == "div" || kind == "coalesce" {
+    return contains_aggregate(column.left) || contains_aggregate(column.right)
+  }
+  if kind != nil && kind.starts_with("cast_") { return contains_aggregate(column.value) }
+  if kind == "case" {
+    return contains_aggregate(column.condition) || contains_aggregate(column["then"]) || contains_aggregate(column["else"])
+  }
+  let operation = column.op as? str
+  if operation == "and" || operation == "or" {
+    for term in column.terms { if contains_aggregate(term) { return true } }
+  }
+  if operation == "not" { return contains_aggregate(column.term) }
+  if operation != nil && operation.starts_with("expr_") {
     return contains_aggregate(column.left) || contains_aggregate(column.right)
   }
   return false

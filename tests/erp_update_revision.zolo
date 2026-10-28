@@ -1,0 +1,4 @@
+use erp_models::Stock
+use std::database::Database
+let db = Database.open("sqlite://:memory:").unwrap()
+Stock::query().where_id(1).update(db, |row| #{revision: 2})

@@ -47,6 +47,14 @@ struct SecondBoundary {
   code: str,
 }
 
+// Omitting the only generated field uses DEFAULT VALUES, with no conflict target.
+@derive(Model)
+@model(table: "generated_tickets")
+struct GeneratedTicket {
+  @model(primary_key: true, generated: true)
+  id: int,
+}
+
 fn expect_unique<T>(result: Result<T, OrmError>) {
   match result {
     .Err(error) => match error {
@@ -140,7 +148,7 @@ fn exercise_upsert() {
   let do_nothing = DirectoryMember::upsert_by_index_tenant_email_statement(
     replacement,
     DirectoryMember::changes(),
-  )
+  ).unwrap()
   assert(
     do_nothing.text.contains("ON CONFLICT (\"tenant_key\", \"email_addr\") DO NOTHING RETURNING"),
   )
@@ -148,7 +156,7 @@ fn exercise_upsert() {
   let inspected = DirectoryMember::upsert_by_index_tenant_email_statement(
     replacement,
     base_patch.set_note(nil),
-  )
+  ).unwrap()
   assert(inspected.text.contains("DO UPDATE SET \"name\" = ?, \"note\" = NULL RETURNING"))
   assert(inspected.params[inspected.params.len() - 1] == "Updated 'member'")
   assert(!inspected.text.contains("Updated 'member'"))
@@ -209,6 +217,14 @@ fn exercise_nullable_conflict() {
   let db = Database.open("sqlite://:memory:").unwrap()
   defer db.close()
   OptionalTag::create_table(db).unwrap()
+  GeneratedTicket::create_table(db).unwrap()
+  let ticket_input = GeneratedTicketInsert.new()
+  let ticket_sql = GeneratedTicket::upsert_by_key_statement(ticket_input, GeneratedTicket::changes()).unwrap()
+  assert(ticket_sql.text.contains("DEFAULT VALUES RETURNING"))
+  assert(!ticket_sql.text.contains("ON CONFLICT"))
+  let ticket = GeneratedTicket::upsert_by_key(db, ticket_input, GeneratedTicket::changes()).unwrap() ?? panic("ticket allocation")
+  let another = GeneratedTicket::upsert_by_key(db, ticket_input, GeneratedTicket::changes()).unwrap() ?? panic("second ticket")
+  assert(ticket.id != another.id)
   let no_code = OptionalTagInsert { code: nil }
   let first = OptionalTag::upsert_by_code(db, no_code, OptionalTag::changes()).unwrap() ?? panic(
     "NULL inserts",
