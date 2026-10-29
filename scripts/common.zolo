@@ -12,7 +12,7 @@ use std::process
 
 /// Absolute package root: the parent of the `scripts/` directory.
 pub fn package_root() -> str {
-    let script = fs.abs(process.argv()[0])
+    let script = fs.abs(process.argv()[0]).unwrap()
     return path.dirname(path.dirname(script))
 }
 
