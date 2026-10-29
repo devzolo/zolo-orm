@@ -1,8 +1,9 @@
-version = 2
+version = 3
 
 [[package]]
 name = "orm"
 version = "0.1.0"
 source = "path+.."
-content = "blake3:40305cb83da39a5815516bf8fc975c7c5feb464974793a494db947ca33d02582"
+source_origin = "path+.."
+content = "blake3:f0e41f9bb2438e9c56a55f54f0b5b684bdd3074d1b9bdd26cf414ac4e6601f5c"
 dependencies = []
