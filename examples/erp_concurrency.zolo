@@ -2,15 +2,17 @@
 use std::database::Database
 use orm::{Model, OrmError, transact, Sql, Assignment, UpdatePlan}
 
-@derive(Model)
-@model(table: "erp_stock", primary_key: [Stock.company_id, Stock.id], scope: [Stock.company_id])
-struct Stock {
-  @model(column: "company_key")
+@table("erp_stock")
+@key([.company_id, .id])
+@scope([.company_id])
+struct Stock deriving Model {
+  @column("company_key")
   company_id: int,
   id: int,
   available: int,
   note: str?,
-  @model(version: true, column: "revision_number")
+  @column("revision_number")
+  @revision
   revision: int = 0,
 }
 

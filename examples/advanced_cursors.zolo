@@ -3,10 +3,9 @@ use std::database::Database
 use orm::Model
 use composed_views::{Directory, seed_directory}
 
-@derive(Model)
-@model(table: "cursor_events")
-struct CursorEvent {
-  @model(primary_key: true)
+@table("cursor_events")
+struct CursorEvent deriving Model {
+  @key
   id: int,
   rank: int?,
   title: str,

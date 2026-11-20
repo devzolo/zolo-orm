@@ -1,8 +1,7 @@
 use orm::{Model}
 
-@derive(Model)
-@model(table: "users; DROP TABLE users")
-struct User {
-  @model(primary_key: true)
+@table("users; DROP TABLE users")
+struct User deriving Model {
+  @key
   id: int,
 }

@@ -1,4 +1,3 @@
 use orm::Query
 use dx_fixture::{Item, Team}
-@derive(Query)
-struct View { item: Item, team: Team?, }
+struct View deriving Query { item: Item, team: Team?, }

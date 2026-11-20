@@ -4,10 +4,9 @@ impl Codec {
   fn encode(value: [str]) -> str { value.join(",") }
   fn decode(value: str) -> Result<[str], str> { Result::Ok([value]) }
 }
-@derive(Model)
-struct Item {
-  @model(primary_key: true)
+struct Item deriving Model {
+  @key
   id: int,
-  @model(codec: Codec)
+  @codec(Codec)
   tags: [str],
 }

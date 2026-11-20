@@ -1,14 +1,12 @@
 use orm::Model
-@derive(Model)
-struct Parent {
-  @model(primary_key: true)
+struct Parent deriving Model {
+  @key
   id: int,
 }
 enum OtherAction { Cascade, }
-@derive(Model)
-struct Child {
-  @model(primary_key: true)
+struct Child deriving Model {
+  @key
   id: int,
-  @model(belongs_to: Parent, foreign_key: true, on_delete: OtherAction::Cascade)
+  @belongs_to(Parent, foreign_key: .{ on_delete: OtherAction::Cascade })
   parent_id: int,
 }

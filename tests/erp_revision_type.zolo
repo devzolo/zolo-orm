@@ -1,8 +1,7 @@
 use orm::Model
-@derive(Model)
-struct Invalid {
-  @model(primary_key: true)
+struct Invalid deriving Model {
+  @key
   id: int,
-  @model(version: true)
+  @revision
   revision: str,
 }

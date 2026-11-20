@@ -1,8 +1,7 @@
 use orm::{Model}
 
-@derive(Model)
-struct Article {
-  @model(primary_key: true)
+struct Article deriving Model {
+  @key
   id: int,
   title: str,
   published: bool,

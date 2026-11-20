@@ -1,11 +1,12 @@
 use orm::Model
 
-@derive(Model)
-struct Item {
-  @model(primary_key: true)
+struct Item deriving Model {
+  @key
   id: int,
-  @model(index: true, column: "upper_code")
+  @column("upper_code")
+  @index
   Code: str,
-  @model(index: true, column: "lower_code")
+  @column("lower_code")
+  @index
   code: str,
 }

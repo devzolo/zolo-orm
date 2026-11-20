@@ -1,9 +1,8 @@
 use orm::Model
 
-@derive(Model)
-struct Item {
-  @model(primary_key: true)
+struct Item deriving Model {
+  @key
   id: int,
-  @model(belongs_to: Missing, foreign_key: true)
+  @belongs_to(Missing, foreign_key: .{})
   owner_id: int,
 }

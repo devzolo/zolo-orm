@@ -2,23 +2,16 @@
 use std::database::Database
 use orm::{Model, Query}
 
-@derive(Model)
-@model(
-  table: "advanced_accounts",
-  primary_key: [Account.tenant_id, Account.id],
-  advanced_indexes: #{
-    active_email: #{
-      unique: true,
-      terms: [
-        #{field: Account.tenant_id},
-        #{field: Account.email, transform: .Lower, direction: .Desc},
-      ],
-      predicate: [#{field: Account.active, kind: .IsTrue}],
-    },
-  },
+@table("advanced_accounts")
+@key([.tenant_id, .id])
+@index(
+  "active_email",
+  unique: true,
+  terms: [.{ field: .tenant_id }, .{ field: .email, transform: .Lower, direction: .Desc }],
+  predicate: [.{ field: .active, kind: .IsTrue }],
 )
-struct Account {
-  @model(column: "tenant_key")
+struct Account deriving Model {
+  @column("tenant_key")
   tenant_id: int,
   id: int,
   email: str,
@@ -26,32 +19,27 @@ struct Account {
   active: bool = true,
 }
 
-@derive(Model)
-@model(
-  table: "advanced_memberships",
-  primary_key: [Membership.tenant_id, Membership.id],
-  foreign_keys: #{
-    account: #{
-      fields: [Membership.tenant_id, Membership.account_id],
-      references: [Account.tenant_id, Account.id],
-      on_delete: .Cascade,
-    },
-  },
+@table("advanced_memberships")
+@key([.tenant_id, .id])
+@foreign_key(
+  "account",
+  fields: [.tenant_id, .account_id],
+  references: [Account.tenant_id, Account.id],
+  on_delete: .Cascade,
 )
-struct Membership {
+struct Membership deriving Model {
   tenant_id: int,
   id: int,
   account_id: int,
   role: str,
 }
 
-@derive(Query)
-struct Directory {
+struct Directory deriving Query {
   membership: Membership,
   @join(
-    from: Directory.membership,
+    from: .membership,
     keys: [Membership.tenant_id, Membership.account_id],
-    reference_keys: [Account.tenant_id, Account.id],
+    references: [Account.tenant_id, Account.id],
   )
   account: Account,
 }

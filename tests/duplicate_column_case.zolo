@@ -1,9 +1,9 @@
 use orm::Model
 
-@derive(Model)
-struct Duplicate {
-  @model(primary_key: true, column: "Name")
+struct Duplicate deriving Model {
+  @key
+  @column("Name")
   id: int,
-  @model(column: "name")
+  @column("name")
   label: str,
 }

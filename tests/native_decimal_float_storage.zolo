@@ -1,8 +1,7 @@
 use orm::Model
-@derive(Model)
-struct FloatStorage {
-  @model(primary_key: true)
+struct FloatStorage deriving Model {
+  @key
   id: int,
-  @model(storage: .Real)
+  @decimal(storage: .Real)
   amount: decimal,
 }

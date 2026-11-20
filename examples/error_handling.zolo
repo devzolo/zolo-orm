@@ -2,19 +2,17 @@
 use std::database::{Database, DbErrorKind}
 use orm::{Model, OrmError, transaction}
 
-@derive(Model)
-@model(table: "registered_accounts")
-struct RegisteredAccount {
-  @model(primary_key: true, generated: true)
+@table("registered_accounts")
+struct RegisteredAccount deriving Model {
+  @key(generated: true)
   id: int,
-  @model(unique: true)
+  @unique
   email: str,
 }
 
-@derive(Model)
-@model(table: "signup_events")
-struct SignupEvent {
-  @model(primary_key: true, generated: true)
+@table("signup_events")
+struct SignupEvent deriving Model {
+  @key(generated: true)
   id: int,
   email: str,
 }

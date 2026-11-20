@@ -4,16 +4,16 @@
 use std::database::Database
 use orm::{Model, OrmError, Sql, transact}
 
-@derive(Model)
-@model(table: "orm_erp_ledger", scope: [Ledger.company_id])
-struct Ledger {
-  @model(primary_key: true, generated: true)
+@table("orm_erp_ledger")
+@scope([.company_id])
+struct Ledger deriving Model {
+  @key(generated: true)
   id: int,
   company_id: int,
-  @model(precision: 38, scale: 2)
+  @decimal(precision: 38, scale: 2)
   amount: bigdecimal,
   units: int,
-  @model(version: true)
+  @revision
   revision: int = 0,
 }
 

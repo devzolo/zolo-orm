@@ -1,9 +1,8 @@
 use std::database::Database
 use orm::Model
 
-@derive(Model)
-struct Person {
-  @model(primary_key: true, generated: true)
+struct Person deriving Model {
+  @key(generated: true)
   id: int,
   name: str,
 }

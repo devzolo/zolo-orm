@@ -1,9 +1,8 @@
 use orm::Model
-@derive(Model)
-struct TextAmount {
-  @model(primary_key: true)
+struct TextAmount deriving Model {
+  @key
   id: int,
-  @model(storage: .Text)
+  @decimal(storage: .Text)
   amount: decimal,
 }
 let wrong = TextAmount::query().select(|row| row.amount * 2d)

@@ -4,13 +4,13 @@ use orm::{Model, OrmError}
 use join_parents::Department
 use join_facade::Employee as Worker
 
-@derive(Model)
-@model(table: "join_nodes")
-struct Node {
-  @model(primary_key: true)
+@table("join_nodes")
+struct Node deriving Model {
+  @key
   id: int,
   name: str,
-  @model(belongs_to: Node, column: "parent_key")
+  @column("parent_key")
+  @belongs_to(Node)
   parent_id: int?,
 }
 
@@ -126,23 +126,21 @@ fn joined_decode_errors() { exercise_join_decode_errors() }
 exercise_join_decode_errors()
 
 // These logical names used to collide when relation and field were simply joined.
-@derive(Model)
-@model(table: "join_reader_parent")
-struct ReaderParent {
-  @model(primary_key: true)
+@table("join_reader_parent")
+struct ReaderParent deriving Model {
+  @key
   id: int,
   c: str,
   b_read_c: str,
 }
 
-@derive(Model)
-@model(table: "join_reader_child")
-struct ReaderChild {
-  @model(primary_key: true)
+@table("join_reader_child")
+struct ReaderChild deriving Model {
+  @key
   id: int,
-  @model(belongs_to: ReaderParent)
+  @belongs_to(ReaderParent)
   a_read_b: int,
-  @model(belongs_to: ReaderParent)
+  @belongs_to(ReaderParent)
   a: int,
 }
 

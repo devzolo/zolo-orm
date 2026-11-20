@@ -3,12 +3,12 @@ use orm::{Model, OrmError, transaction}
 
 fn default_label() -> str { return "Guest \"account\"" }
 
-@derive(Model)
-@model(table: "profiles")
-struct Profile {
-  @model(primary_key: true, generated: true, column: "profile_id")
+@table("profiles")
+struct Profile deriving Model {
+  @key(generated: true)
+  @column("profile_id")
   id: int,
-  @model(unique: true)
+  @unique
   email: str,
   label: str = default_label(),
   active: bool = true,
@@ -16,12 +16,11 @@ struct Profile {
   note: str? = "initial",
 }
 
-@derive(Model)
-@model(table: "messages")
-struct Message {
-  @model(primary_key: true, generated: true)
+@table("messages")
+struct Message deriving Model {
+  @key(generated: true)
   id: int,
-  @model(belongs_to: Profile)
+  @belongs_to(Profile)
   profile_id: int,
   text: str,
 }

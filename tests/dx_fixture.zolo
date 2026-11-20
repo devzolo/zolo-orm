@@ -6,18 +6,16 @@ impl StateCodec {
   pub fn encode(value: State) -> str { return if value == State::Active { "active" } else { "disabled" } }
   pub fn decode(value: str) -> Result<State, str> { return Result::Ok(State::Active) }
 }
-@derive(Model)
-pub struct Item {
-  @model(primary_key: true)
+pub struct Item deriving Model {
+  @key
   pub id: int,
   pub name: str,
-  @model(codec: StateCodec)
+  @codec(StateCodec)
   pub state: State,
   pub note: str?,
 }
-@derive(Model)
-pub struct Team {
-  @model(primary_key: true)
+pub struct Team deriving Model {
+  @key
   pub id: int,
   pub name: str,
 }

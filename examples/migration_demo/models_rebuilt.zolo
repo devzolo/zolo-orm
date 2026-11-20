@@ -1,13 +1,13 @@
 //! Alternate schema: enforce unique titles and add a persistent SQL body default.
 use orm::Model
 
-@derive(Model)
-@model(table: "notes")
-pub struct Note {
-  @model(primary_key: true, generated: true)
+@table("notes")
+pub struct Note deriving Model {
+  @key(generated: true)
   pub id: int,
-  @model(index: true, unique: true)
+  @unique
+  @index
   pub title: str,
-  @model(default_sql: "''")
+  @default_sql("''")
   pub body: str = "",
 }

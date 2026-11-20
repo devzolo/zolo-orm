@@ -1,9 +1,8 @@
 use orm::Model
 
-@derive(Model)
-struct Item {
-  @model(primary_key: true)
+struct Item deriving Model {
+  @key
   id: int,
-  @model(unique: true)
+  @unique
   id_statement: str,
 }

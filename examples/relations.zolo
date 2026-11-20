@@ -1,19 +1,17 @@
 use std::database::Database
 use orm::{Model, OrmError}
 
-@derive(Model)
-struct Customer {
-  @model(primary_key: true)
+struct Customer deriving Model {
+  @key
   id: int,
-  @model(unique: true)
+  @unique
   code: str,
 }
 
-@derive(Model)
-struct Ticket {
-  @model(primary_key: true, generated: true)
+struct Ticket deriving Model {
+  @key(generated: true)
   id: int,
-  @model(belongs_to: Customer, references: Customer.code)
+  @belongs_to(Customer.code)
   customer_code: str?,
   label: str,
 }

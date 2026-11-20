@@ -4,12 +4,11 @@ use orm::Model
 
 fn construction_default() -> str { panic("a patch must not evaluate construction defaults") }
 
-@derive(Model)
-@model(table: "patch_accounts")
-struct Account {
-  @model(primary_key: true)
+@table("patch_accounts")
+struct Account deriving Model {
+  @key
   id: int,
-  @model(unique: true)
+  @unique
   email: str,
   name: str = construction_default(),
   note: str? = "construction note",
@@ -17,10 +16,9 @@ struct Account {
   visits: int = 10,
 }
 
-@derive(Model)
-@model(table: "patch_hygiene")
-struct Names {
-  @model(primary_key: true)
+@table("patch_hygiene")
+struct Names deriving Model {
+  @key
   id: int,
   panic: str,
   type: str,

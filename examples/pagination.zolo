@@ -2,31 +2,33 @@
 use std::database::Database
 use orm::{Model, OrmError, QueryPlan}
 
-@derive(Model)
-@model(table: "page_buckets")
-struct Bucket {
-  @model(primary_key: true, column: "bucket_key")
+@table("page_buckets")
+struct Bucket deriving Model {
+  @key
+  @column("bucket_key")
   id: int,
   category: int,
   name: str,
 }
 
-@derive(Model)
-@model(table: "page_entries", indexes: #{by_rank: [Entry.rank, Entry.id]})
-struct Entry {
-  @model(primary_key: true, column: "entry_key")
+@table("page_entries")
+@index("by_rank", [.rank, .id])
+struct Entry deriving Model {
+  @key
+  @column("entry_key")
   id: int,
   rank: int,
   note: str?,
   // Non-unique target deliberately exercises joined row multiplicity.
-  @model(belongs_to: Bucket, references: Bucket.category, column: "bucket_code")
+  @column("bucket_code")
+  @belongs_to(Bucket.category)
   bucket: int?,
 }
 
-@derive(Model)
-@model(table: "page_labels")
-struct Label {
-  @model(primary_key: true, column: "label_key")
+@table("page_labels")
+struct Label deriving Model {
+  @key
+  @column("label_key")
   id: str,
   title: str,
 }

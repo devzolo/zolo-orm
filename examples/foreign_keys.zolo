@@ -4,61 +4,56 @@ use std::database::{Database, DbErrorKind}
 use orm::{Model, OrmError}
 use schema_parents::Organization as Org
 
-@derive(Model)
-@model(table: "memberships")
-struct Membership {
-  @model(primary_key: true, generated: true)
+@table("memberships")
+struct Membership deriving Model {
+  @key(generated: true)
   id: int,
-  @model(belongs_to: Org, references: Org.code, foreign_key: true, on_delete: .SetNull, on_update: .Cascade, column: "organization_code")
+  @column("organization_code")
+  @belongs_to(Org.code, foreign_key: .{ on_delete: .SetNull, on_update: .Cascade })
   org_code: str?,
   label: str,
 }
 
-@derive(Model)
-struct Invoice {
-  @model(primary_key: true, generated: true)
+struct Invoice deriving Model {
+  @key(generated: true)
   id: int,
-  @model(belongs_to: Org, foreign_key: true, on_delete: .Cascade)
+  @belongs_to(Org, foreign_key: .{ on_delete: .Cascade })
   org_id: int,
 }
 
-@derive(Model)
-struct ExternalReference {
-  @model(primary_key: true, generated: true)
+struct ExternalReference deriving Model {
+  @key(generated: true)
   id: int,
-  @model(belongs_to: Org, references: Org.external_key, foreign_key: true, on_delete: .Cascade)
+  @belongs_to(Org.external_key, foreign_key: .{ on_delete: .Cascade })
   org_key: str,
 }
 
-@derive(Model)
-struct Restriction {
-  @model(primary_key: true, generated: true)
+struct Restriction deriving Model {
+  @key(generated: true)
   id: int,
-  @model(belongs_to: Org, foreign_key: true)
+  @belongs_to(Org, foreign_key: .{})
   org_id: int,
 }
 
-@derive(Model)
-struct DefaultMembership {
-  @model(primary_key: true, generated: true)
+struct DefaultMembership deriving Model {
+  @key(generated: true)
   id: int,
-  @model(belongs_to: Org, foreign_key: true, on_delete: .SetDefault, default_sql: "1")
+  @belongs_to(Org, foreign_key: .{ on_delete: .SetDefault })
+  @default_sql("1")
   org_id: int = 1,
 }
 
-@derive(Model)
-struct NullableParent {
-  @model(primary_key: true, generated: true)
+struct NullableParent deriving Model {
+  @key(generated: true)
   id: int,
-  @model(unique: true)
+  @unique
   code: str?,
 }
 
-@derive(Model)
-struct NullableChild {
-  @model(primary_key: true, generated: true)
+struct NullableChild deriving Model {
+  @key(generated: true)
   id: int,
-  @model(belongs_to: NullableParent, references: NullableParent.code, foreign_key: true, on_delete: .SetNull)
+  @belongs_to(NullableParent.code, foreign_key: .{ on_delete: .SetNull })
   code: str?,
 }
 

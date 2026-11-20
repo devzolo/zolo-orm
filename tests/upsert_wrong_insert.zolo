@@ -1,15 +1,13 @@
 use orm::Model
 
-@derive(Model)
-struct Item {
-  @model(primary_key: true)
+struct Item deriving Model {
+  @key
   id: int,
   name: str,
 }
 
-@derive(Model)
-struct Other {
-  @model(primary_key: true)
+struct Other deriving Model {
+  @key
   id: int,
 }
 

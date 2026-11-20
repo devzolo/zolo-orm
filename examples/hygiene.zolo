@@ -3,9 +3,8 @@ use orm::Model
 
 fn default_label() -> str { return "from function" }
 
-@derive(Model)
-struct Collision {
-  @model(primary_key: true, generated: true)
+struct Collision deriving Model {
+  @key(generated: true)
   id: int,
   db: str,
   params: str,

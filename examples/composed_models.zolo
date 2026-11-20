@@ -2,51 +2,50 @@
 use std::database::Database
 use orm::{Model, Query, OrmError}
 
-@derive(Model)
-@model(table: "view_organizations")
-pub struct Organization {
-  @model(primary_key: true, column: "organization_key")
+@table("view_organizations")
+pub struct Organization deriving Model {
+  @key
+  @column("organization_key")
   pub id: int,
   pub name: str,
 }
-@derive(Model)
-@model(table: "view_teams")
-pub struct Team {
-  @model(primary_key: true, column: "team_key")
+@table("view_teams")
+pub struct Team deriving Model {
+  @key
+  @column("team_key")
   pub id: int,
-  @model(belongs_to: Organization)
+  @belongs_to(Organization)
   pub organization_id: int?,
   pub name: str,
 }
-@derive(Model)
-@model(table: "view_people")
-pub struct Person {
-  @model(primary_key: true, column: "person_key")
+@table("view_people")
+pub struct Person deriving Model {
+  @key
+  @column("person_key")
   pub id: int,
-  @model(belongs_to: Team, column: "team_code")
+  @column("team_code")
+  @belongs_to(Team)
   pub team_id: int?,
-  @model(belongs_to: Person)
+  @belongs_to(Person)
   pub manager_id: int?,
   pub name: str,
 }
 
-@derive(Query)
-pub struct Directory {
+pub struct Directory deriving Query {
   pub person: Person,
-  @join(from: Directory.person, key: Person.team_id, references: Team.id)
+  @join(from: .person, keys: [Person.team_id], references: [Team.id])
   pub team: Team?,
-  @join(from: Directory.team, key: Team.organization_id, references: Organization.id)
+  @join(from: .team, keys: [Team.organization_id], references: [Organization.id])
   pub organization: Organization?,
-  @join(from: Directory.person, key: Person.manager_id, references: Person.id)
+  @join(from: .person, keys: [Person.manager_id], references: [Person.id])
   pub manager: Person?,
 }
 
-@derive(Query)
-pub struct Employed {
+pub struct Employed deriving Query {
   pub person: Person,
-  @join(from: Employed.person, key: Person.team_id, references: Team.id)
+  @join(from: .person, keys: [Person.team_id], references: [Team.id])
   pub team: Team,
-  @join(from: Employed.team, key: Team.organization_id, references: Organization.id)
+  @join(from: .team, keys: [Team.organization_id], references: [Organization.id])
   pub organization: Organization,
 }
 

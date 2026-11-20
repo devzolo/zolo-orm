@@ -37,36 +37,34 @@ impl CreditsCodec {
   }
 }
 
-@derive(Model)
-@model(table: "domain_accounts", unique_indexes: #{by_email: [Account.email]})
-pub struct Account {
-  @model(primary_key: true)
+@table("domain_accounts")
+@index("by_email", [.email], unique: true)
+pub struct Account deriving Model {
+  @key
   pub id: int,
-  @model(codec: EmailCodec)
+  @codec(EmailCodec)
   pub email: Email,
-  @model(codec: StateCodec, storage: .Text)
+  @codec(StateCodec, storage: .Text)
   pub state: State = .Active,
-  @model(codec: StateCodec)
+  @codec(StateCodec)
   pub previous_state: State?,
-  @model(codec: CreditsCodec, storage: .Integer)
+  @codec(CreditsCodec, storage: .Integer)
   pub credits: Credits,
 }
 
 // A codec field called row must not collide with the model's bind_row helper.
-@derive(Model)
-@model(table: "domain_links")
-pub struct AccountLink {
-  @model(primary_key: true)
+@table("domain_links")
+pub struct AccountLink deriving Model {
+  @key
   pub id: int,
-  @model(belongs_to: Account)
+  @belongs_to(Account)
   pub account_id: int?,
-  @model(codec: StateCodec)
+  @codec(StateCodec)
   pub row: State = .Active,
 }
 
-@derive(Query)
-pub struct AccountDirectory {
+pub struct AccountDirectory deriving Query {
   pub link: AccountLink,
-  @join(from: AccountDirectory.link, key: AccountLink.account_id, references: Account.id)
+  @join(from: .link, keys: [AccountLink.account_id], references: [Account.id])
   pub account: Account?,
 }

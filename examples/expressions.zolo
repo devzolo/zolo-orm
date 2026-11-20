@@ -1,10 +1,10 @@
 use orm::Model
 use std::database::Database
 
-@derive(Model)
-@model(table: "people")
-struct Person {
-  @model(primary_key: true, column: "person_id")
+@table("people")
+struct Person deriving Model {
+  @key
+  @column("person_id")
   id: int,
   name: str,
   active: bool,

@@ -2,19 +2,19 @@
 use std::database::Database
 use orm::{Model, OrmError}
 
-@derive(Model)
-@model(table: "read_accounts")
-struct ReadAccount {
-  @model(primary_key: true, generated: true, column: "account_id")
+@table("read_accounts")
+struct ReadAccount deriving Model {
+  @key(generated: true)
+  @column("account_id")
   id: int,
   email: str,
   active: bool = true,
 }
 
-@derive(Model)
-@model(table: "read_tokens")
-struct ReadToken {
-  @model(primary_key: true, column: "token_key")
+@table("read_tokens")
+struct ReadToken deriving Model {
+  @key
+  @column("token_key")
   key: str,
   label: str,
 }

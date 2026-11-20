@@ -1,9 +1,13 @@
-use orm::Model
+use orm::{Model, ForeignKeyAction}
 
-@derive(Model)
-struct Item {
-  @model(primary_key: true)
+struct Owner deriving Model {
+  @key
   id: int,
-  @model(on_delete: .Cascade)
+}
+
+struct Item deriving Model {
+  @key
+  id: int,
+  @belongs_to(Owner, on_delete: ForeignKeyAction::Cascade)
   owner_id: int,
 }

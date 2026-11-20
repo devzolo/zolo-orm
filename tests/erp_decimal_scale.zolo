@@ -1,8 +1,8 @@
 use orm::{Model, ExactDecimal, DecimalCodec}
-@derive(Model)
-struct Invalid {
-  @model(primary_key: true)
+struct Invalid deriving Model {
+  @key
   id: int,
-  @model(codec: DecimalCodec, storage: .Decimal, precision: 4, scale: 5)
+  @codec(DecimalCodec, storage: .Decimal)
+  @decimal(precision: 4, scale: 5)
   amount: ExactDecimal,
 }

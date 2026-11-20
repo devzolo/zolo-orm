@@ -1,6 +1,4 @@
 use orm::Model
-@derive(Model)
-@model(primary_key: [Entry.id], advanced_indexes: #{
-  name: #{terms: [#{field: Entry.name}], condition: []}
-})
-struct Entry { id: int, name: str }
+@key([.id])
+@index("name", terms: [.{ field: .name }], condition: [])
+struct Entry deriving Model { id: int, name: str }

@@ -1,9 +1,8 @@
 use orm::Query
 use dx_fixture::{Item, Team}
-@derive(Query)
-struct View {
+struct View deriving Query {
  item: Item,
- @join(from: View.item, key: Item.id, references: Team.id)
+ @join(from: .item, keys: [Item.id], references: [Team.id])
  team: Team?,
 }
 let query = View::query().select(|item, team| team.name)

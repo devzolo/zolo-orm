@@ -1,6 +1,5 @@
 use orm::{Model}
 
-@derive(Model)
-struct User {
+struct User deriving Model {
   id: int,
 }

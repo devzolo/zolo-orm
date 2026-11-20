@@ -1,36 +1,32 @@
 //! Imported model fixtures: no codec import is required for language decimals.
 use orm::{Model, Query}
 
-@derive(Model)
-@model(table: "numeric_invoices")
-pub struct NumericInvoice {
-  @model(primary_key: true)
+@table("numeric_invoices")
+pub struct NumericInvoice deriving Model {
+  @key
   pub id: int,
-  @model(scale: 6)
+  @decimal(scale: 6)
   pub amount: decimal,
 }
 
-@derive(Model)
-@model(table: "numeric_balances")
-pub struct NumericBalance {
-  @model(primary_key: true)
+@table("numeric_balances")
+pub struct NumericBalance deriving Model {
+  @key
   pub id: int,
-  @model(precision: 60, scale: 8)
+  @decimal(precision: 60, scale: 8)
   pub amount: bigdecimal,
 }
 
-@derive(Model)
-@model(table: "decimal_text_rows")
-pub struct DecimalTextRow {
-  @model(primary_key: true)
+@table("decimal_text_rows")
+pub struct DecimalTextRow deriving Model {
+  @key
   pub id: int,
-  @model(storage: .Text)
+  @decimal(storage: .Text)
   pub amount: decimal = 0.1d,
-  @model(storage: .Text)
+  @decimal(storage: .Text)
   pub balance: bigdecimal?,
 }
 
-@derive(Query)
-pub struct InvoiceReport {
+pub struct InvoiceReport deriving Query {
   pub invoice: NumericInvoice,
 }

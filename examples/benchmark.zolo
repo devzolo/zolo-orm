@@ -2,9 +2,8 @@ use std::database::Database
 use std::os
 use orm::{Model}
 
-@derive(Model)
-struct Sample {
-  @model(primary_key: true)
+struct Sample deriving Model {
+  @key
   id: int,
   label: str,
   enabled: bool,

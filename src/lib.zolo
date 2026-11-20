@@ -681,12 +681,6 @@ pub enum IndexDirection { Asc, Desc }
 pub enum IndexTransform { Identity, Lower, Upper, Length, Abs }
 pub enum IndexPredicateKind { IsNull, IsNotNull, IsTrue, IsFalse }
 
-struct ForeignKeyOptions {
-  fields: [FieldRef],
-  references: [FieldRef],
-  on_delete: ForeignKeyAction = .NoAction,
-  on_update: ForeignKeyAction = .NoAction,
-}
 struct IndexTerm {
   field: FieldRef,
   transform: IndexTransform = .Identity,
@@ -696,56 +690,136 @@ struct IndexPredicate {
   field: FieldRef,
   kind: IndexPredicateKind = .IsNotNull,
 }
-struct IndexOptions {
-  terms: [IndexTerm],
-  unique: bool = false,
-  predicate: [IndexPredicate] = [],
-}
 
 /// Physical scalar representation of a domain codec.
 pub enum LockWait { Wait, NoWait, SkipLocked }
 
 pub enum StorageType { Text, Integer, Real, Boolean, Binary, Decimal }
 
-/// What `@model(...)` says about a model and about each of its fields.
-pub decorator model {
-  mark field(
-    codec: TypeRef? = nil,
-    // Unwritten, a native decimal is stored as DECIMAL and a codec as TEXT.
-    storage: StorageType? = nil,
-    column: str = "",
-    primary_key: bool = false,
-    unique: bool = false,
-    index: bool = false,
-    generated: bool = false,
-    belongs_to: TypeRef? = nil,
-    references: FieldRef? = nil,
-    foreign_key: bool = false,
-    // Unwritten, NO ACTION. Written, they require `foreign_key: true`.
-    on_delete: ForeignKeyAction? = nil,
-    on_update: ForeignKeyAction? = nil,
-    // Explicit SQL literal default for schema migrations; Zolo defaults remain application-side.
-    default_sql: str = "",
-    // Server NUMERIC storage. Native decimal types select their codec automatically.
-    // Unwritten, the precision is 28 for `decimal` and 38 for any other type.
-    precision: int? = nil,
-    scale: int = 2,
-    // Integer optimistic revision, compared and incremented by versioned writes.
-    version: bool = false,
-    // Excluded from generated audit changes.
-    redact: bool = false,
-  )
-  mark struct(
-    table: str = "",
-    primary_key: [FieldRef] = [],
-    foreign_keys: Map<str, ForeignKeyOptions> = #{},
-    advanced_indexes: Map<str, IndexOptions> = #{},
-    indexes: Map<str, [FieldRef]> = #{},
-    unique_indexes: Map<str, [FieldRef]> = #{},
-    // Fields required by the generated scoped repository.
-    scope: [FieldRef] = [],
-  )
+/// A foreign-key constraint on a relation: what the database does to the
+/// child rows when the parent row changes.
+struct ForeignKey {
+  on_delete: ForeignKeyAction = .NoAction,
+  on_update: ForeignKeyAction = .NoAction,
 }
+
+/// What a model says about itself and about its fields. `Model` and `Query`
+/// bring these names into the types that derive them.
+pub mod marks {
+  /// The table of a model, when it is not the type's name in lower case.
+  pub decorator table(name: str) mark struct
+
+  /// On a field, the primary key. On the model, the fields of a composite
+  /// key, in order.
+  pub decorator key {
+    mark field(generated: bool = false)
+    mark struct(fields: [FieldRef<Self>])
+  }
+
+  /// The column of a field, when it is not the field's name.
+  pub decorator column(name: str) mark field
+
+  pub decorator unique mark field
+
+  /// On a field, an index on its column. On the model, a named index: of
+  /// `fields`, or of `terms` with an optional `predicate`.
+  pub decorator index {
+    mark field
+    mark struct(
+      name: str,
+      fields: [FieldRef<Self>] = [],
+      terms: [IndexTerm] = [],
+      unique: bool = false,
+      predicate: [IndexPredicate] = [],
+    ) repeatable
+  }
+
+  /// The parent a field points at: a model, for its `id`, or one of its
+  /// fields. `foreign_key` makes the database enforce it.
+  pub decorator belongs_to(target: TypeRef | FieldRef, foreign_key: ForeignKey? = nil) mark field
+
+  /// A foreign key over several fields.
+  pub decorator foreign_key(
+    name: str,
+    fields: [FieldRef<Self>],
+    references: [FieldRef],
+    on_delete: ForeignKeyAction = .NoAction,
+    on_update: ForeignKeyAction = .NoAction,
+  ) mark struct repeatable
+
+  /// The codec that stores a domain type. Unwritten, the storage is TEXT.
+  pub decorator codec(with: TypeRef, storage: StorageType? = nil) mark field
+
+  /// Server NUMERIC storage. Unwritten, the precision is 28 for `decimal`
+  /// and 38 for any other type, and a native decimal is stored as DECIMAL.
+  pub decorator decimal(precision: int? = nil, scale: int = 2, storage: StorageType? = nil) mark field
+
+  /// Explicit SQL literal default for schema migrations; Zolo defaults remain application-side.
+  pub decorator default_sql(value: str) mark field
+
+  /// Integer optimistic revision, compared and incremented by versioned writes.
+  pub decorator revision mark field
+
+  /// Excluded from generated audit changes.
+  pub decorator redact mark field
+
+  /// Fields required by the generated scoped repository.
+  pub decorator scope(fields: [FieldRef<Self>]) mark struct
+
+  /// On a source of a query view: the earlier source it joins, and the
+  /// fields that pair up.
+  pub decorator join(from: FieldRef<Self>? = nil, keys: [FieldRef] = [], references: [FieldRef] = []) mark field
+}
+
+/// The parent of a relation, as a type reference, whichever way
+/// `@belongs_to` named it.
+@comptime
+fn relation_parent(field) {
+  let target = field.mark(belongs_to)?.target
+  if target == nil { return nil }
+  return if target.has("owner") { target.owner } else { target }
+}
+
+/// The field a relation points at, when `@belongs_to` names one.
+@comptime
+fn relation_reference(field) {
+  let target = field.mark(belongs_to)?.target
+  return if target != nil && target.has("owner") { target } else { nil }
+}
+
+/// The named indexes of a model in the order the schema declares them: the
+/// plain ones, the unique ones, then the ones written as terms, each group
+/// by name.
+@comptime
+fn declared_indexes(info) {
+  let declared = info.marks(index)
+  let by_terms = declared.filter(|entry| entry.terms.len() > 0 || entry.predicate.len() > 0)
+  let by_fields = declared.filter(|entry| entry.terms.len() == 0 && entry.predicate.len() == 0)
+  let ordered = []
+  for group in [by_fields.filter(|entry| !entry.unique), by_fields.filter(|entry| entry.unique), by_terms] {
+    for name in group.map(|entry| entry.name).sort() {
+      for entry in group.filter(|entry| entry.name == name) { ordered.push(entry) }
+    }
+  }
+  return ordered
+}
+
+/// Whether a field is a key the database generates: `@key(generated: true)`.
+@comptime
+fn generated_key(field) -> bool { return field.mark(key)?.generated ?? false }
+
+/// The scale of a NUMERIC column: `@decimal(scale: n)`, or 2.
+@comptime
+fn decimal_scale(field) -> int { return field.mark(decimal)?.scale ?? 2 }
+
+/// The SQL default of a column, `@default_sql("...")`, or "" for none.
+@comptime
+fn sql_default(field) -> str { return field.mark(default_sql)?.value ?? "" }
+
+/// The storage a field asks for: in `@codec`, or in `@decimal` for a native
+/// decimal. `nil` when it asks for none.
+@comptime
+fn written_storage(field) { return field.mark(codec)?.storage ?? field.mark(decimal)?.storage }
 
 @comptime
 fn identifier(name: str) -> str {
@@ -762,19 +836,20 @@ fn identifier(name: str) -> str {
 
 @comptime
 fn column_name(field) -> str {
-  return if field.opts(model).column == "" { field.name } else { field.opts(model).column }
+  let mapped = field.mark(column)?.name ?? ""
+  return if mapped == "" { field.name } else { mapped }
 }
 
-/// Type-level primary_key is ordered; field flags are the legacy scalar form.
+/// `@key([...])` on the model is ordered; `@key` on one field is the scalar form.
 @comptime
 fn model_primary_fields(info) {
-  let declared = info.mark(model)?.primary_key ?? []
-  let legacy = info.fields.filter(|field| field.opts(model).primary_key)
+  let declared = info.mark(key)?.fields ?? []
+  let legacy = info.fields.filter(|field| field.mark(key) != nil)
   if declared.len() > 0 && legacy.len() > 0 {
-    panic("orm: do not combine type-level primary_key with legacy field primary_key flags")
+    panic("orm: write the key on the model, `@key([...])`, or on one field, not both")
   }
   if declared.len() == 0 {
-    if legacy.len() != 1 { panic("orm: declare primary_key: [Model.field, ...] or one legacy primary_key field") }
+    if legacy.len() != 1 { panic("orm: declare a key: `@key` on one field, or `@key([.a, .b])` on the model") }
     return legacy
   }
   let keys = []
@@ -792,16 +867,14 @@ fn model_primary_fields(info) {
 
 @comptime
 fn model_unique_fields(info, fields: [str]) -> bool {
-  let has_keys = (info.mark(model)?.primary_key ?? []).len() > 0 || info.fields.filter(|field| field.opts(model).primary_key).len() == 1
+  let has_keys = (info.mark(key)?.fields ?? []).len() > 0 || info.fields.filter(|field| field.mark(key) != nil).len() == 1
   let primary = if has_keys { model_primary_fields(info).map(|field| field.name) } else { [] }
   if primary == fields { return true }
-  if fields.len() == 1 && info.fields.filter(|field| field.name == fields[0] && field.opts(model).unique).len() == 1 {
+  if fields.len() == 1 && info.fields.filter(|field| field.name == fields[0] && field.mark(unique) != nil).len() == 1 {
     return true
   }
-  let indexes = info.mark(model)?.unique_indexes ?? #{}
-  for name in indexes.keys() {
-    let references = indexes[name]
-    if references.map(|field| field.name) == fields && references.filter(|field| field.owner.identity != info.identity).len() == 0 {
+  for entry in info.marks(index) {
+    if entry.unique && entry.terms.len() == 0 && entry.fields.map(|field| field.name) == fields {
       return true
     }
   }
@@ -811,9 +884,10 @@ fn model_unique_fields(info, fields: [str]) -> bool {
 @comptime
 fn composite_foreign_keys(info) -> [str] {
   let result: [str] = []
-  for name in info.opts(model).foreign_keys.keys().sort() {
+  let declared = info.marks(foreign_key)
+  for name in declared.map(|entry| entry.name).sort() {
     identifier(name)
-    let foreign = info.opts(model).foreign_keys[name]
+    let foreign = declared.filter(|entry| entry.name == name)[0]
     if foreign.fields.len() == 0 || foreign.fields.len() != foreign.references.len() {
       panic("orm: foreign key requires equally sized nonempty fields/references: " + name)
     }
@@ -832,15 +906,15 @@ fn composite_foreign_keys(info) -> [str] {
       let source = info.fields.filter(|field| field.name == local.name)[0]
       for action in [foreign.on_delete, foreign.on_update] {
         if action == ForeignKeyAction::SetNull && !source.type.is_optional { panic("orm: SET NULL requires all foreign-key fields optional") }
-        if action == ForeignKeyAction::SetDefault && !source.type.is_optional && source.opts(model).default_sql == "" {
+        if action == ForeignKeyAction::SetDefault && !source.type.is_optional && sql_default(source) == "" {
           panic("orm: SET DEFAULT requires a SQL default on every required foreign-key field")
         }
       }
       fields.push(local.name)
       references.push(target.name)
     }
-    if !model_unique_fields(parent, references) { panic("orm: foreign key must reference a complete primary, column UNIQUE or unique_indexes key in its declared order") }
-    let configured = parent.mark(model)?.table ?? ""
+    if !model_unique_fields(parent, references) { panic("orm: foreign key must reference a complete primary key, a `@unique` column or a unique `@index`, in its declared order") }
+    let configured = parent.mark(table)?.name ?? ""
     let table = if configured == "" { parent.name.lower() } else { configured }
     let local_columns = foreign.fields.map(|field| identifier(reflected_column(field.info))).join(", ")
     let target_columns = foreign.references.map(|field| identifier(reflected_column(field.info))).join(", ")
@@ -932,34 +1006,29 @@ fn model_indexes(info, table_name: str) {
   let indexes = []
   let seen: [str] = []
   for field in info.fields {
-    if field.opts(model).index {
+    if field.mark(index) != nil {
       if seen.contains(field.name.lower()) { panic("orm: duplicate index name: " + field.name) }
       seen.push(field.name.lower())
       indexes.push(index_spec_names(info, table_name, field.name, [field.name], false))
     }
   }
-  for name in info.opts(model).indexes.keys().sort() {
+  for entry in declared_indexes(info) {
+    let name = entry.name
     if seen.contains(name.lower()) { panic("orm: duplicate index name: " + name) }
     seen.push(name.lower())
-    indexes.push(index_spec(info, table_name, name, info.opts(model).indexes[name], false))
-  }
-  for name in info.opts(model).unique_indexes.keys().sort() {
-    if seen.contains(name.lower()) { panic("orm: duplicate index name: " + name) }
-    seen.push(name.lower())
-    indexes.push(index_spec(info, table_name, name, info.opts(model).unique_indexes[name], true))
-  }
-  for name in info.opts(model).advanced_indexes.keys().sort() {
-    if seen.contains(name.lower()) { panic("orm: duplicate index name: " + name) }
-    seen.push(name.lower())
-    indexes.push(advanced_index_spec(info, table_name, name, info.opts(model).advanced_indexes[name]))
+    if entry.terms.len() > 0 || entry.predicate.len() > 0 {
+      if entry.fields.len() > 0 { panic("orm: an index takes fields or terms, not both: " + name) }
+      indexes.push(advanced_index_spec(info, table_name, name, entry))
+    } else {
+      indexes.push(index_spec(info, table_name, name, entry.fields, entry.unique))
+    }
   }
   return indexes
 }
 
 @comptime
 fn reflected_column(field) -> str {
-  let mapped = field.opts(model).column
-  return if mapped == "" { field.name } else { mapped }
+  return column_name(field)
 }
 
 @comptime
@@ -976,42 +1045,36 @@ fn foreign_action(action: ForeignKeyAction) -> str {
 /// Resolve the logical referenced field once, preserving its owner identity.
 @comptime
 fn relation_field(field) {
-  let parent = field.opts(model).belongs_to
-  if parent == nil { panic("orm: references requires belongs_to") }
+  let parent = relation_parent(field)
+  if parent == nil { panic("orm: a relation requires @belongs_to") }
   if parent.info.kind != "struct" { panic("orm: relation target must be a struct") }
-  let referenced = field.opts(model).references
-  if referenced != nil {
-    if referenced.owner.identity != parent.identity {
-      panic("orm: references field must belong to the belongs_to type")
-    }
-    return referenced.info
-  }
+  let referenced = relation_reference(field)
+  if referenced != nil { return referenced.info }
   let fields = parent.info.fields.filter(|target| target.name == "id")
-  if fields.len() != 1 { panic("orm: relation target has no id field; provide references: Parent.field") }
+  if fields.len() != 1 { panic("orm: relation target has no id field; name one: @belongs_to(Parent.field)") }
   return fields[0]
 }
 
 @comptime
 fn foreign_key_clause(field) -> str {
-  if !field.opts(model).foreign_key { return "" }
-  if field.opts(model).belongs_to == nil { panic("orm: foreign_key requires belongs_to") }
-  let parent = field.opts(model).belongs_to.info
+  let constraint = field.mark(belongs_to)?.foreign_key
+  if constraint == nil { return "" }
+  let parent = relation_parent(field).info
   if parent.kind != "struct" { panic("orm: foreign-key target must be a model struct") }
   let target = relation_field(field)
   if field_kind(target) != field_kind(field) { panic("orm: foreign-key field type does not match referenced field") }
   let unique = model_unique_fields(parent, [target.name])
   if !unique { panic("orm: foreign-key target must be a primary key or a single-field UNIQUE key") }
-  let parent_table = parent.mark(model)?.table ?? ""
+  let parent_table = parent.mark(table)?.name ?? ""
   let table_name = if parent_table == "" { parent.name.lower() } else { parent_table }
-  let target_column = target.opts(model).column
-  let target_name = if target_column == "" { target.name } else { target_column }
-  let on_delete = foreign_action(field.opts(model).on_delete ?? ForeignKeyAction::NoAction)
-  let on_update = foreign_action(field.opts(model).on_update ?? ForeignKeyAction::NoAction)
+  let target_name = column_name(target)
+  let on_delete = foreign_action(constraint.on_delete)
+  let on_update = foreign_action(constraint.on_update)
   if (on_delete == "SET NULL" || on_update == "SET NULL") && !field.type.is_optional {
     panic("orm: SET NULL requires an optional foreign-key field")
   }
-  if (on_delete == "SET DEFAULT" || on_update == "SET DEFAULT") && !field.type.is_optional && field.opts(model).default_sql == "" {
-    panic("orm: SET DEFAULT requires default_sql on a required foreign-key field")
+  if (on_delete == "SET DEFAULT" || on_update == "SET DEFAULT") && !field.type.is_optional && sql_default(field) == "" {
+    panic("orm: SET DEFAULT requires @default_sql on a required foreign-key field")
   }
   return " REFERENCES " + identifier(table_name) + " (" + identifier(target_name) + ") ON DELETE " + on_delete + " ON UPDATE " + on_update
 }
@@ -1042,7 +1105,7 @@ fn native_decimal_kind(field) -> str {
 
 @comptime
 fn field_storage(field) -> StorageType {
-  let explicit = field.opts(model).storage
+  let explicit = written_storage(field)
   if explicit != nil { return explicit }
   return if native_decimal_kind(field) != "" { StorageType::Decimal } else { StorageType::Text }
 }
@@ -1053,12 +1116,12 @@ fn numeric_decimal(field) -> bool { return field_storage(field) == StorageType::
 @comptime
 fn decimal_precision(field) -> int {
   let fallback = if native_decimal_kind(field) == "decimal" { 28 } else { 38 }
-  return field.opts(model).precision ?? fallback
+  return field.mark(decimal)?.precision ?? fallback
 }
 
 @comptime
 fn field_codec(field) {
-  let explicit = field.opts(model).codec
+  let explicit = field.mark(codec)?.with
   if explicit != nil { return explicit }
   let kind = native_decimal_kind(field)
   if kind == "decimal" { return typeinfo(__orm_builtin_fixed_decimal_codec) }
@@ -1069,7 +1132,7 @@ fn field_codec(field) {
 /// Automatic codec calls need real consumer bindings, not the producer's locals.
 @comptime
 fn runtime_codec_ref(field, info) {
-  let explicit = field.opts(model).codec
+  let explicit = field.mark(codec)?.with
   if explicit != nil { return explicit.ref }
   let kind = native_decimal_kind(field)
   if kind == "decimal" { return generated_local(info, "__orm_" + info.name + "_NativeDecimalCodec") }
@@ -1218,25 +1281,25 @@ fn query_expression_methods(query: Syntax<.Ident>, row_types, error_type: Syntax
 
 /// Generates nominal decoding, CRUD, batched inserts, and a query API whose
 /// field names and parameter types are checked by the compiler and the LSP.
-pub derive Model owns model emits siblings {
+pub derive Model owns marks emits siblings {
   expand struct(info) -> Syntax<.Items> {
     if info.kind != "struct" { panic("orm: Model requires a struct") }
     if info.fields.len() == 0 { panic("orm: Model requires at least one field") }
     if info.fields.len() > 900 { panic("orm: model exceeds the batch parameter budget") }
     var batch_capacity = 1
     while (batch_capacity + 1) * info.fields.len() <= 900 { batch_capacity = batch_capacity + 1 }
-    let table_name = if info.opts(model).table == "" { info.name.lower() } else { info.opts(model).table }
+    let table_name = info.mark(table)?.name ?? info.name.lower()
     let table = identifier(table_name)
     let keys = model_primary_fields(info)
     let key_names = keys.map(|field| field.name)
-    let version_fields = info.fields.filter(|field| field.opts(model).version)
+    let version_fields = info.fields.filter(|field| field.mark(revision) != nil)
     if version_fields.len() > 1 { panic("orm: only one revision field is allowed") }
     let revision = if version_fields.len() == 0 { nil } else { version_fields[0] }
     if revision != nil && (field_kind(revision) != "int" || revision.type.is_optional || field_codec(revision) != nil || key_names.contains(revision.name)) {
       panic("orm: revision requires a nonoptional integer field outside the primary key")
     }
     let scoped_fields = []
-    for field in info.opts(model).scope {
+    for field in (info.mark(scope)?.fields ?? []) {
       if field.owner.identity != info.identity { panic("orm: scope field must belong to this model") }
       if field.info.type.is_optional || field_codec(field.info) != nil || !["int", "str"].contains(field_kind(field.info)) {
         panic("orm: scope fields require nonoptional integer or string values")
@@ -1252,7 +1315,7 @@ pub derive Model owns model emits siblings {
     for field in info.fields.filter(|field| numeric_decimal(field)) {
       if field_codec(field) == nil { panic("orm: numeric decimal storage requires a codec") }
       let precision = decimal_precision(field)
-      if precision < 1 || precision > 1000 || field.opts(model).scale < 0 || field.opts(model).scale > precision {
+      if precision < 1 || precision > 1000 || decimal_scale(field) < 0 || decimal_scale(field) > precision {
         panic("orm: decimal precision must be 1..1000 and scale must be 0..precision")
       }
       if native_decimal_kind(field) == "decimal" && precision > 28 {
@@ -1268,11 +1331,11 @@ pub derive Model owns model emits siblings {
       seen.push(name.lower())
       let kind = field_kind(field)
       let codec = field_codec(field)
-      if native_decimal_kind(field) != "" && field.opts(model).codec == nil
+      if native_decimal_kind(field) != "" && field.mark(codec)?.with == nil
         && field_storage(field) != StorageType::Decimal && field_storage(field) != StorageType::Text {
         panic("orm: native decimals require Decimal or Text storage; never use floating-point storage")
       }
-      if codec != nil && (key_names.contains(field.name) || field.opts(model).generated || field.opts(model).belongs_to != nil) {
+      if codec != nil && (key_names.contains(field.name) || generated_key(field) || relation_parent(field) != nil) {
         panic("orm: codec fields cannot be primary, generated or relation keys")
       }
       if codec != nil {
@@ -1283,7 +1346,7 @@ pub derive Model owns model emits siblings {
           panic("orm: codec domains require a scalar or named type; wrap collections in a newtype")
         }
       }
-      if codec == nil && field.opts(model).storage != nil {
+      if codec == nil && written_storage(field) != nil {
         panic("orm: storage requires a codec")
       }
       if kind != "int" && kind != "str" && kind != "float" && kind != "bool" && !(kind == "bytes" && codec != nil) {
@@ -1294,25 +1357,19 @@ pub derive Model owns model emits siblings {
       if key_names.contains(field.name) && field.type.is_optional {
         panic("orm: primary key cannot be optional")
       }
-      if field.opts(model).generated && (keys.len() != 1 || !key_names.contains(field.name) || kind != "int") {
+      if generated_key(field) && (keys.len() != 1 || !key_names.contains(field.name) || kind != "int") {
         panic("orm: generated requires an integer primary key")
       }
-      if field.opts(model).generated && field.opts(model).default_sql != "" {
+      if generated_key(field) && sql_default(field) != "" {
         panic("orm: generated key cannot declare a database default")
       }
-      if field.opts(model).generated && field.has_default {
+      if generated_key(field) && field.has_default {
         panic("orm: generated key cannot declare an application default")
       }
-      if !field.opts(model).foreign_key && (field.opts(model).on_delete != nil || field.opts(model).on_update != nil) {
-        panic("orm: foreign-key actions require foreign_key: true")
-      }
-      if field.opts(model).belongs_to != nil && (kind != "int" && kind != "str") {
+      if relation_parent(field) != nil && (kind != "int" && kind != "str") {
         panic("orm: belongs_to requires an integer or string key")
       }
-      if field.opts(model).references != nil && field.opts(model).belongs_to == nil {
-        panic("orm: references requires belongs_to")
-      }
-      if field.opts(model).belongs_to != nil {
+      if relation_parent(field) != nil {
         let referenced = relation_field(field)
         if field_codec(referenced) != nil { panic("orm: codec fields cannot be referenced relation keys") }
         if field_kind(referenced) != field_kind(field) {
@@ -1381,12 +1438,12 @@ pub derive Model owns model emits siblings {
     let ddl_columns = info.fields.map(
       |field| {
         let foreign = foreign_key_clause(field)
-        if field.opts(model).generated {
+        if generated_key(field) {
           return identifier(column_name(field)) + " INTEGER PRIMARY KEY AUTOINCREMENT" + foreign
         }
         let kind = field_kind(field)
         let precision = decimal_precision(field)
-        let sql_type = if numeric_decimal(field) { "DECIMAL({precision}, {field.opts(model).scale})" } else { match kind {
+        let sql_type = if numeric_decimal(field) { "DECIMAL({precision}, {decimal_scale(field)})" } else { match kind {
           "int" => "BIGINT",
           "str" => "TEXT",
           "float" => "DOUBLE PRECISION",
@@ -1396,8 +1453,8 @@ pub derive Model owns model emits siblings {
         } }
         let nullable = if field.type.is_optional { "" } else { " NOT NULL" }
         let primary = if keys.len() == 1 && key_names.contains(field.name) { " PRIMARY KEY" } else { "" }
-        let unique = if field.opts(model).unique { " UNIQUE" } else { "" }
-        let database_default = if field.opts(model).default_sql == "" { "" } else { " DEFAULT " + field.opts(model).default_sql }
+        let unique = if field.mark(unique) != nil { " UNIQUE" } else { "" }
+        let database_default = if sql_default(field) == "" { "" } else { " DEFAULT " + sql_default(field) }
         return identifier(column_name(field)) + " " + sql_type + nullable + primary + unique + database_default + foreign
       },
     )
@@ -1439,7 +1496,7 @@ pub derive Model owns model emits siblings {
       let method = syntax.ident("__orm_encode_" + field.name)
       let stored_type = storage_type(field)
       let encoded = if numeric_decimal(field) {
-        quote expr { checked_decimal_storage(${reference}::encode(value), ${decimal_precision(field)}, ${field.opts(model).scale}) }
+        quote expr { checked_decimal_storage(${reference}::encode(value), ${decimal_precision(field)}, ${decimal_scale(field)}) }
       } else { quote expr { ${reference}::encode(value) } }
       if field.type.is_optional {
         return quote member {
@@ -1487,7 +1544,7 @@ pub derive Model owns model emits siblings {
         names.push(${identifier(column_name(field))})
         slots.push(bind_value(params, ${value}))
       }
-      if field.opts(model).generated { return quote stmt { if insert.${field.member} != nil { ${append} } } }
+      if generated_key(field) { return quote stmt { if insert.${field.member} != nil { ${append} } } }
       return append
     })
     let schema_fields = info.fields.map(
@@ -1569,9 +1626,9 @@ pub derive Model owns model emits siblings {
     let nonkeys = info.fields.filter(|field| !immutable_names.contains(field.name))
     let mutable_columns = nonkeys.map(|field| column_name(field))
     let mutable_quoted_columns = mutable_columns.map(|column| identifier(column))
-    let relations = info.fields.filter(|field| field.opts(model).belongs_to != nil).map(
+    let relations = info.fields.filter(|field| relation_parent(field) != nil).map(
       |field| {
-        let parent_type = field.opts(model).belongs_to.ref
+        let parent_type = relation_parent(field).ref
         let referenced = relation_field(field)
         let parent_key = referenced.member
         let loader = syntax.ident("load_" + field.name)
@@ -1628,19 +1685,19 @@ pub derive Model owns model emits siblings {
     let join_items = []
     let join_methods = []
     let join_proxies = []
-    for relation in info.fields.filter(|field| field.opts(model).belongs_to != nil) {
-      let parent = relation.opts(model).belongs_to.info
+    for relation in info.fields.filter(|field| relation_parent(field) != nil) {
+      let parent = relation_parent(relation).info
       // A loader can accept plain parent records. SQL joins require model key metadata.
       if parent != nil && parent.kind == "struct" {
-        let has_keys = (parent.mark(model)?.primary_key ?? []).len() > 0 || parent.fields.filter(|field| field.opts(model).primary_key).len() == 1
+        let has_keys = (parent.mark(key)?.fields ?? []).len() > 0 || parent.fields.filter(|field| field.mark(key) != nil).len() == 1
         let parent_keys = if has_keys { model_primary_fields(parent) } else { [] }
         if parent_keys.len() > 0 {
           let parent_key = parent_keys[0]
           if parent_keys.filter(|field| field.type.is_optional).len() > 0 { panic("orm: joined model primary key cannot be optional") }
           let referenced = relation_field(relation)
           if field_kind(referenced) != field_kind(relation) { panic("orm: joined fields require matching scalar types") }
-          let parent_type = relation.opts(model).belongs_to.ref
-          let configured_table = parent.mark(model)?.table ?? ""
+          let parent_type = relation_parent(relation).ref
+          let configured_table = parent.mark(table)?.name ?? ""
           let parent_table = if configured_table == "" { parent.name.lower() } else { configured_table }
           let reference_column = reflected_column(referenced)
           let proxy_prefix = "__orm_join_{relation.name.len()}_" + relation.name + "_"
@@ -1744,7 +1801,7 @@ pub derive Model owns model emits siblings {
             join_items.push(quote items {
               @sql_query(sources: [
                 #{schema: ${schema_name}, alias: "orm_l", reader_type: ${info.name}, numeric_reader: "__orm_nullable_read_"},
-                #{source: ${relation.opts(model).belongs_to.binding}, alias: "orm_r", reader_type: ${info.name}, reader: ${proxy_prefix + "read_"}, numeric_reader: ${proxy_prefix + "__orm_nullable_read_"}, encoder_prefix: ${proxy_prefix}, nullable: ${optional}, presence: ${parent_key.name}},
+                #{source: ${relation_parent(relation).binding}, alias: "orm_r", reader_type: ${info.name}, reader: ${proxy_prefix + "read_"}, numeric_reader: ${proxy_prefix + "__orm_nullable_read_"}, encoder_prefix: ${proxy_prefix}, nullable: ${optional}, presence: ${parent_key.name}},
               ], filter: "filter_plan", select: "project", group_by: "group_plan", having: "having_plan", computed: "project_expr", scalar_reader: "__orm_scalar_", on: "on_plan")
               pub struct ${joined_type} { pub plan: QueryPlan, }
               impl ${joined_type} {
@@ -1868,7 +1925,7 @@ pub derive Model owns model emits siblings {
         }
       }
     })
-    let inputs = info.fields.filter(|field| !field.opts(model).generated)
+    let inputs = info.fields.filter(|field| !generated_key(field))
     let connection_var = generated_local(info, "db")
     let bindings_var = generated_local(info, "__orm_bindings")
     let slots_var = generated_local(info, "__orm_slots")
@@ -1897,7 +1954,7 @@ pub derive Model owns model emits siblings {
     )
     let insert_fields = info.fields.map(
       |field| {
-        if field.opts(model).generated {
+        if generated_key(field) {
           return quote member { pub ${field.member}: int? = nil, }
         }
         if field.has_default {
@@ -1913,7 +1970,7 @@ pub derive Model owns model emits siblings {
     let conflict_targets = [#{method: "upsert_by_key", columns: quoted_keys.join(", ")}]
     let conflict_names: [str] = ["upsert_by_key", "upsert_by_key_statement"]
     for field in info.fields {
-      if keys.len() == 1 && key_names.contains(field.name) || field.opts(model).unique {
+      if keys.len() == 1 && key_names.contains(field.name) || field.mark(unique) != nil {
         let method = "upsert_by_" + field.name
         if method == "upsert_by_key" && keys.len() == 1 && key_names.contains(field.name) { continue }
         for name in [method, method + "_statement"] {
@@ -2035,8 +2092,8 @@ pub derive Model owns model emits siblings {
         let new_value: Any = if current == nil { nil } else { ${new} }
         if old_value != new_value {
           fields.push(${field_change_type}.new(${field.name},
-            if ${field.opts(model).redact} { nil } else { old_value },
-            if ${field.opts(model).redact} { nil } else { new_value }, ${field.opts(model).redact}))
+            if ${field.mark(redact) != nil} { nil } else { old_value },
+            if ${field.mark(redact) != nil} { nil } else { new_value }, ${field.mark(redact) != nil}))
         }
       }
     })
@@ -2542,16 +2599,9 @@ pub derive Model owns model emits siblings {
 }
 
 // Every join edge names a prior source and two real model fields.
-pub decorator join(
-  from: FieldRef? = nil,
-  key: FieldRef? = nil,
-  references: FieldRef? = nil,
-  keys: [FieldRef] = [],
-  reference_keys: [FieldRef] = [],
-) mark field
 
 /// Derive a read-only result view with named, typed model sources.
-pub derive Query owns join emits siblings {
+pub derive Query owns marks emits siblings {
   expand struct(info) -> Syntax<.Items> {
     if info.kind != "struct" { panic("orm: Query requires a struct") }
     if info.fields.len() == 0 || info.fields.len() > 16 {
@@ -2593,29 +2643,20 @@ pub derive Query owns join emits siblings {
         panic("orm: query source requires nonoptional primary-key fields")
       }
       let key = keys[0]
-      let configured_table = source_model.mark(model)?.table ?? ""
+      let configured_table = source_model.mark(table)?.name ?? ""
       let table = if configured_table == "" { source_model.name.lower() } else { configured_table }
       identifier(table)
       let alias = "orm_s{ordinal}"
       if ordinal == 0 {
         if source.type.is_optional { panic("orm: the first query source cannot be optional") }
-        if source.opts(join).from != nil || source.opts(join).key != nil || source.opts(join).references != nil || source.opts(join).keys.len() > 0 || source.opts(join).reference_keys.len() > 0 {
-          panic("orm: the first query source cannot declare a join")
-        }
+        if source.mark(join) != nil { panic("orm: the first query source cannot declare a join") }
       } else {
         let from = source.opts(join).from
         let left_keys = source.opts(join).keys
-        let right_keys = source.opts(join).reference_keys
-        if source.opts(join).key != nil || source.opts(join).references != nil {
-          if left_keys.len() > 0 || right_keys.len() > 0 { panic("orm: do not combine scalar and composite join keys") }
-          if source.opts(join).key == nil || source.opts(join).references == nil { panic("orm: joined sources require both key and references") }
-          left_keys.push(source.opts(join).key)
-          right_keys.push(source.opts(join).references)
-        }
+        let right_keys = source.opts(join).references
         if from == nil || left_keys.len() == 0 || left_keys.len() != right_keys.len() {
-          panic("orm: joined sources require from and equally sized nonempty keys/reference_keys")
+          panic("orm: joined sources require from and equally sized nonempty keys/references")
         }
-        if from.owner.identity != info.identity { panic("orm: join source must belong to this query view") }
         let prior = from.info.index
         if prior >= ordinal { panic("orm: join source must precede its target") }
         let predicates = []

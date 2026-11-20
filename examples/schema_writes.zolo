@@ -3,55 +3,54 @@
 use std::database::{Database, DbErrorKind}
 use orm::{Model, OrmError}
 
-@derive(Model)
-@model(table: "directory_members", indexes: #{by_name: [DirectoryMember.name, DirectoryMember.tenant_id]}, unique_indexes: #{
-  tenant_email: [DirectoryMember.tenant_id, DirectoryMember.email],
-})
-struct DirectoryMember {
-  @model(primary_key: true, generated: true, column: "member_id")
+@table("directory_members")
+@index("by_name", [.name, .tenant_id])
+@index("tenant_email", [.tenant_id, .email], unique: true)
+struct DirectoryMember deriving Model {
+  @key(generated: true)
+  @column("member_id")
   id: int,
-  @model(index: true, column: "tenant_key")
+  @column("tenant_key")
+  @index
   tenant_id: int,
-  @model(column: "email_addr")
+  @column("email_addr")
   email: str,
-  @model(unique: true)
+  @unique
   alias: str,
   name: str = "New member",
   note: str? = "Created",
 }
 
-@derive(Model)
-@model(table: "optional_tags")
-struct OptionalTag {
-  @model(primary_key: true, generated: true)
+@table("optional_tags")
+struct OptionalTag deriving Model {
+  @key(generated: true)
   id: int,
-  @model(unique: true)
+  @unique
   code: str?,
   label: str = "New tag",
 }
 
 // These table/name pairs used to collapse to the same SQL index name.
-@derive(Model)
-@model(table: "a_b", unique_indexes: #{c: [FirstBoundary.code]})
-struct FirstBoundary {
-  @model(primary_key: true, generated: true)
+@table("a_b")
+@index("c", [.code], unique: true)
+struct FirstBoundary deriving Model {
+  @key(generated: true)
   id: int,
   code: str,
 }
 
-@derive(Model)
-@model(table: "a", unique_indexes: #{b_c: [SecondBoundary.code]})
-struct SecondBoundary {
-  @model(primary_key: true, generated: true)
+@table("a")
+@index("b_c", [.code], unique: true)
+struct SecondBoundary deriving Model {
+  @key(generated: true)
   id: int,
   code: str,
 }
 
 // Omitting the only generated field uses DEFAULT VALUES, with no conflict target.
-@derive(Model)
-@model(table: "generated_tickets")
-struct GeneratedTicket {
-  @model(primary_key: true, generated: true)
+@table("generated_tickets")
+struct GeneratedTicket deriving Model {
+  @key(generated: true)
   id: int,
 }
 

@@ -4,27 +4,19 @@ use orm::{Model, ForeignKeyAction}
 use schema_parents::Organization as Team
 use schema_parents::Organization as Organization
 
-@derive(Model)
-@model(table: "typed_members")
-struct Member {
-  @model(primary_key: true, generated: true)
+@table("typed_members")
+struct Member deriving Model {
+  @key(generated: true)
   id: int,
-  @model(
-    belongs_to: Team,
-    references: Organization.code,
-    foreign_key: true,
-    on_delete: ForeignKeyAction::Cascade,
-    on_update: .Cascade,
-    column: "team_code",
-  )
+  @column("team_code")
+  @belongs_to(Organization.code, foreign_key: .{ on_delete: ForeignKeyAction::Cascade, on_update: .Cascade })
   team: str,
 }
 
-@derive(Model)
-struct RestrictedMember {
-  @model(primary_key: true, generated: true)
+struct RestrictedMember deriving Model {
+  @key(generated: true)
   id: int,
-  @model(belongs_to: Team, references: Team.id, foreign_key: true, on_delete: .Restrict)
+  @belongs_to(Team.id, foreign_key: .{ on_delete: .Restrict })
   team_id: int,
 }
 

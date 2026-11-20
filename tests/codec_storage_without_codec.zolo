@@ -1,3 +1,2 @@
 use orm::Model
-@derive(Model)
-struct Item { @model(primary_key: true) id: int, @model(storage: .Integer) value: int, }
+struct Item deriving Model { @key id: int, @decimal(storage: .Integer) value: int, }

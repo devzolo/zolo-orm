@@ -2,20 +2,19 @@
 use std::database::Database
 use orm::{Model, OrmError, Date, DateCodec, Timestamp, TimestampCodec, ExactDecimal, DecimalCodec, Blob, BlobCodec}
 
-@derive(Model)
-@model(table: "builtin_documents")
-struct Document {
-  @model(primary_key: true)
+@table("builtin_documents")
+struct Document deriving Model {
+  @key
   id: int,
-  @model(codec: DateCodec)
+  @codec(DateCodec)
   day: Date,
-  @model(codec: TimestampCodec)
+  @codec(TimestampCodec)
   created_at: Timestamp,
-  @model(codec: DecimalCodec)
+  @codec(DecimalCodec)
   amount: ExactDecimal,
-  @model(codec: BlobCodec, storage: .Binary)
+  @codec(BlobCodec, storage: .Binary)
   payload: Blob,
-  @model(codec: BlobCodec, storage: .Binary)
+  @codec(BlobCodec, storage: .Binary)
   optional_payload: Blob?,
 }
 

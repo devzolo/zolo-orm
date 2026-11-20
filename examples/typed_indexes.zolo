@@ -2,18 +2,15 @@
 use std::database::Database
 use orm::Model
 
-@derive(Model)
-@model(
-  table: "typed_index_accounts",
-  indexes: #{by_name: [Account.name, Account.tenant_id]},
-  unique_indexes: #{tenant_email: [Account.tenant_id, Account.email]},
-)
-struct Account {
-  @model(primary_key: true, generated: true)
+@table("typed_index_accounts")
+@index("by_name", [.name, .tenant_id])
+@index("tenant_email", [.tenant_id, .email], unique: true)
+struct Account deriving Model {
+  @key(generated: true)
   id: int,
-  @model(column: "tenant_key")
+  @column("tenant_key")
   tenant_id: int,
-  @model(column: "email_address")
+  @column("email_address")
   email: str,
   name: str,
 }

@@ -3,20 +3,19 @@
 use std::database::Database
 use orm::{Model, OrmError, transaction}
 
-@derive(Model)
-@model(table: "authors")
-struct Author {
-  @model(primary_key: true, generated: true)
+@table("authors")
+struct Author deriving Model {
+  @key(generated: true)
   id: int,
   name: str,
 }
 
-@derive(Model)
-@model(table: "articles")
-struct Article {
-  @model(primary_key: true, generated: true)
+@table("articles")
+struct Article deriving Model {
+  @key(generated: true)
   id: int,
-  @model(belongs_to: Author, foreign_key: true, on_delete: .Cascade, index: true)
+  @index
+  @belongs_to(Author, foreign_key: .{ on_delete: .Cascade })
   author_id: int,
   title: str,
 }

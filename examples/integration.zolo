@@ -1,22 +1,21 @@
 use std::database::Database
 use orm::{Model}
 
-@derive(Model)
-@model(table: "accounts")
-struct Account {
-  @model(primary_key: true, column: "account_id")
+@table("accounts")
+struct Account deriving Model {
+  @key
+  @column("account_id")
   id: int,
-  @model(unique: true)
+  @unique
   email: str,
   score: float,
   active: bool,
   note: str?,
 }
 
-@derive(Model)
-@model(table: "tasks")
-struct Todo {
-  @model(primary_key: true)
+@table("tasks")
+struct Todo deriving Model {
+  @key
   id: int,
   account_id: int,
   title: str,

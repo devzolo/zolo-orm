@@ -3,13 +3,12 @@
 use std::database::Database
 use orm::{Model, OrmError}
 
-@derive(Model)
-@model(table: "users")
-struct User {
-  @model(primary_key: true, generated: true)
+@table("users")
+struct User deriving Model {
+  @key(generated: true)
   id: int,
   name: str,
-  @model(unique: true)
+  @unique
   email: str,
   active: bool = true,
   note: str?,

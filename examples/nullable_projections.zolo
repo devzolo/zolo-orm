@@ -2,10 +2,9 @@
 use std::database::Database
 use orm::Model
 
-@derive(Model)
-@model(table: "nullable_readings")
-struct Reading {
-  @model(primary_key: true)
+@table("nullable_readings")
+struct Reading deriving Model {
+  @key
   id: int,
   label: str?,
   count: int?,

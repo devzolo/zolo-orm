@@ -1,7 +1,6 @@
 use orm::Model
-@derive(Model)
-struct NativeAmount {
-  @model(primary_key: true)
+struct NativeAmount deriving Model {
+  @key
   id: int,
   amount: decimal,
 }

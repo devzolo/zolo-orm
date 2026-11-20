@@ -1,10 +1,9 @@
 //! Imported model exercises public computed readers without field-reader collisions.
 use orm::Model
 
-@derive(Model)
-@model(table: "aggregate_sales")
-pub struct Sale {
-  @model(primary_key: true)
+@table("aggregate_sales")
+pub struct Sale deriving Model {
+  @key
   pub id: int,
   pub category: str,
   pub units: int,

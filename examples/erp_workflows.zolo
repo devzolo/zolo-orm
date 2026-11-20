@@ -2,16 +2,15 @@
 use std::database::Database
 use orm::{Model, OrmError, Actor, AuditEntry, OutboxEvent, transact, create_infrastructure, pending_events, acknowledge_event, diff_collection, Change}
 
-@derive(Model)
-@model(table: "erp_orders")
-struct Order {
-  @model(primary_key: true)
+@table("erp_orders")
+struct Order deriving Model {
+  @key
   id: int,
   units: int,
   status: str,
-  @model(redact: true)
+  @redact
   private_note: str,
-  @model(version: true)
+  @revision
   revision: int = 0,
 }
 

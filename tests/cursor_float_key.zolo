@@ -1,5 +1,4 @@
 use orm::Model
 use std::database::Database
-@derive(Model)
-struct Item { @model(primary_key: true) id: float, }
+struct Item deriving Model { @key id: float, }
 fn bad(db: Database) { Item::query().cursor_page(db) }

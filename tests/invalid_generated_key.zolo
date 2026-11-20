@@ -1,7 +1,6 @@
 use orm::Model
 
-@derive(Model)
-struct Person {
-  @model(primary_key: true, generated: true)
+struct Person deriving Model {
+  @key(generated: true)
   id: str,
 }
