@@ -9,40 +9,40 @@ The snippets extend the User model in [basic.zolo](../examples/basic.zolo).
 A model is an ordinary struct. Fields may be `int`, `float`, `str`, `bool` or
 the optional form of any of them. A [domain codec](domain-codecs.md) maps other
 types, including enums and newtypes, to scalar storage. Every model declares
-a primary key, whose fields cannot be optional or use codecs. Use a field flag
-for a single key or a type-level list for a [composite key](advanced-schemas.md).
+a primary key, whose fields cannot be optional or use codecs. Use `@key` on
+a field for a single key or `@key([...])` on the model for a [composite key](advanced-schemas.md).
 
 ```rust
 fn default_availability() -> bool { true }
 
-@derive(Model)
-@model(table: "inventory")
-pub struct Product {
-  @model(primary_key: true, generated: true, column: "product_id")
+@table("inventory")
+pub struct Product deriving Model {
+  @key(generated: true)
+  @column("product_id")
   pub id: int,
   pub name: str,
   pub available: bool = default_availability(),
 }
 ```
 
-Field options:
+Field decorators:
 
-| Option | Meaning |
+| Decorator | Meaning |
 | --- | --- |
-| `primary_key: true` | The single-field row key; alternatively declare a type-level primary_key list. |
-| `generated: true` | Let SQLite allocate the key. Single-field integer keys only. |
-| `unique: true` | Adds a UNIQUE constraint and a typed `upsert_by_FIELD` method. |
-| `index: true` | Adds a named index on this field. |
-| `column: "name"` | Maps the field to a different SQL column. |
-| `belongs_to: Parent` | Declares a relation to a visible model type, including an imported alias. |
-| `references: Parent.field` | A field reference on the same parent type; defaults to `id`. |
-| `foreign_key: true` | Adds an enforced foreign key for the declared relation. |
-| `on_delete` / `on_update` | `.NoAction`, `.Restrict`, `.Cascade`, `.SetNull` or `.SetDefault`; require `foreign_key: true`. |
-| `codec: DomainCodec` | Converts a logical field type to scalar storage; a real type reference. |
-| `storage` | Codec storage: `.Text` (default), `.Integer`, `.Real`, `.Boolean` or `.Binary`. |
-| `default_sql: "literal"` | A database default used by schema tooling; construction defaults remain application-side. |
+| `@key` | The single-field row key; alternatively write `@key([...])` on the model. |
+| `@key(generated: true)` | Let SQLite allocate the key. Single-field integer keys only. |
+| `@unique` | Adds a UNIQUE constraint and a typed `upsert_by_FIELD` method. |
+| `@index` | Adds a named index on this field. |
+| `@column("name")` | Maps the field to a different SQL column. |
+| `@belongs_to(Parent)` | Declares a relation to a visible model type, including an imported alias. It points at the parent's `id`. |
+| `@belongs_to(Parent.field)` | Points at another field of the parent type. |
+| `@belongs_to(Parent, foreign_key: .{})` | Adds an enforced foreign key for the declared relation. |
+| `foreign_key: .{ on_delete: .X, on_update: .Y }` | Actions inside the constraint: `.NoAction`, `.Restrict`, `.Cascade`, `.SetNull` or `.SetDefault`. |
+| `@codec(DomainCodec)` | Converts a logical field type to scalar storage; a real type reference. |
+| `@codec(DomainCodec, storage: .X)` | Codec storage: `.Text` (default), `.Integer`, `.Real`, `.Boolean` or `.Binary`. |
+| `@default_sql("literal")` | A database default used by schema tooling; construction defaults remain application-side. |
 
-Without `generated: true` the application supplies every key. Generated keys use
+Without `@key(generated: true)` the application supplies every key. Generated keys use
 SQLite's rowid allocation, so the id of a deleted row may be reused later.
 
 Default expressions run when a row is created and are evaluated in the scope of
@@ -57,22 +57,19 @@ the supplied connection and can run inside an existing transaction.
 
 ## Indexes and conflict targets
 
-A field can opt into `@model(index: true)`. For composite indexes, declare
-named lists of field references on the model:
+A field can opt into `@index`. For composite indexes, write one `@index`
+per index on the model, with a name and a list of field references:
 
 ```rust
-@derive(Model)
-@model(
-  table: "members",
-  indexes: #{by_name: [Member.name, Member.tenant_id]},
-  unique_indexes: #{tenant_email: [Member.tenant_id, Member.email]},
-)
-struct Member {
-  @model(primary_key: true)
+@table("members")
+@index("by_name", [.name, .tenant_id])
+@index("tenant_email", [.tenant_id, .email], unique: true)
+struct Member deriving Model {
+  @key
   id: int,
   tenant_id: int,
   name: str,
-  @model(column: "email_address")
+  @column("email_address")
   email: str,
 }
 ```
@@ -83,17 +80,17 @@ The editor can navigate and rename the referenced fields. Index labels such
 as `tenant_email` and physical `table`/`column` names remain strings.
 
 When upgrading, replace `["tenant_id", "email"]` with
-`[Member.tenant_id, Member.email]`. Field-name strings in index lists are
-rejected; `@model(index: true)` on an individual field is unchanged.
+`[.tenant_id, .email]`. Field-name strings in index lists are
+rejected; `@index` on an individual field is unchanged.
 
-The derive converts those fields through their `column` mappings and quotes
+The derive converts those fields through their `@column` mappings and quotes
 every SQL identifier. Index names are `zolo_<table-length>_<table>_<name>_idx` or
 `zolo_<table-length>_<table>_<name>_uidx`; the length prefix keeps table/name
 boundaries unambiguous. A field's shorthand uses its logical field name.
 Empty lists, unknown/repeated fields, invalid identifiers and duplicate index
-names are compile errors. Named maps are emitted in key order.
+names are compile errors. Named indexes are emitted in a fixed order: plain, unique, then term-based, each by name.
 
-Primary keys, `unique: true` fields and `unique_indexes` declare the only
+Primary keys, `@unique` fields and indexes written with `unique: true` declare the only
 available typed upsert targets. A normal index does not make a field unique.
 See [typed_indexes.zolo](../examples/typed_indexes.zolo) for the short walkthrough
 and [schema_writes.zolo](../examples/schema_writes.zolo) for a complete model with
@@ -170,7 +167,7 @@ explicit NULL, false/zero/empty values and reuse.
 | Store SQL NULL in an optional field | Pass `nil`. | Pass `field: nil` or call `set_FIELD(nil)`. |
 | Preserve the stored value | Not an insertion operation. | Omit its argument and setter. |
 
-An optional field with no explicit default starts as NULL. `default_sql`
+An optional field with no explicit default starts as NULL. `@default_sql`
 declares a database default for schema tooling and referential actions; it does
 not replace the Zolo default expression used by `create`. If both paths need
 the same default, declare both deliberately.

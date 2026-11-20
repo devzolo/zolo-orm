@@ -6,8 +6,8 @@ are selected automatically. See [financial values](financial-values.md).
 Import compatibility domains and other codecs from `orm`. Dates, UTC timestamps
 and the legacy ExactDecimal wrapper use
 canonical text by default; blobs use real binary SQL values. Exact decimals can
-opt into server numeric storage with `storage: .Decimal` and explicit precision
-and scale; see [financial values](financial-values.md).
+opt into server numeric storage with `@decimal(storage: .Decimal)` or
+`@decimal(precision: p, scale: s)`; see [financial values](financial-values.md).
 
 | Domain | Constructor | Codec | Storage |
 | --- | --- | --- | --- |
@@ -21,16 +21,15 @@ and scale; see [financial values](financial-values.md).
 ```zolo
 use orm::{Model, Date, DateCodec, ExactDecimal, DecimalCodec, Blob, BlobCodec}
 
-@derive(Model)
-@model(table: "receipts")
-struct Receipt {
-  @model(primary_key: true)
+@table("receipts")
+struct Receipt deriving Model {
+  @key
   id: int,
-  @model(codec: DateCodec)
+  @codec(DateCodec)
   day: Date,
-  @model(codec: DecimalCodec)
+  @codec(DecimalCodec)
   amount: ExactDecimal,
-  @model(codec: BlobCodec, storage: .Binary)
+  @codec(BlobCodec, storage: .Binary)
   attachment: Blob?,
 }
 ```

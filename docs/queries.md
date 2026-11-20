@@ -183,7 +183,7 @@ keys, stable joins, invalid requests and query reuse.
 
 A `belongs_to` field generates one INNER and one LEFT join method when its
 target is a model with a nonoptional primary key. The method uses the logical
-field name. For `@model(belongs_to: Department) department_id: int?`:
+field name. For `@belongs_to(Department) department_id: int?`:
 
 ```rust
 let rows = Worker::query()
@@ -237,7 +237,7 @@ the presence contract described above.
 
 These helpers expose one `belongs_to` edge. For several sources, relation chains
 or repeated models, declare a [composed query view](composed-queries.md) with
-`@derive(Query)`. It gives each source a name and produces that view as its result.
+a struct `deriving Query`. It gives each source a name and produces that view as its result.
 [Computed projections and aggregates](aggregates.md) use the same source lambdas.
 Joined mutations and RIGHT/FULL joins still require explicit SQL. See [joins.zolo](../examples/joins.zolo) for the single-edge API,
 imports, reexports, self joins, bound ON conditions and decoding failures.

@@ -65,7 +65,7 @@ this repository ignores `*.db` and its SQLite sidecar files.
 ## Evolve and inspect
 
 After changing a model, run `zolo db generate <name>`, inspect both SQL
-directions, then migrate and check again. Adding `@model(index: true)` to a
+directions, then migrate and check again. Adding `@index` to a
 field can produce a reversible index migration. With no difference, the
 current CLI reports that the schema is already up to date and returns a
 nonzero status; no migration is created.

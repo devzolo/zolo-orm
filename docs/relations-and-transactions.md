@@ -8,11 +8,10 @@ Relations are explicit. Nothing is loaded lazily and no property access issues
 a query.
 
 ```rust
-@derive(Model)
-struct Post {
-  @model(primary_key: true, generated: true)
+struct Post deriving Model {
+  @key(generated: true)
   id: int,
-  @model(belongs_to: User)
+  @belongs_to(User)
   user_id: int,
   title: str,
 }
@@ -25,31 +24,26 @@ for related in Post::load_user_id(db, users)? {
 
 `load_user_id` returns one entry per parent, in the order the parents were
 given, each with `.parent` and `.items`. Parent keys are deduplicated and
-fetched with `IN` queries of at most 900 keys. `references: User.other_key` points
+fetched with `IN` queries of at most 900 keys. `@belongs_to(User.other_key)` points
 the relation at a parent field other than the primary key. A nullable parent
 key produces an empty child group when its value is nil.
 
 A loading relation alone does not add a constraint. Opt into enforcement:
 
 ```rust
-@model(
-  belongs_to: User,
-  references: User.id,
-  foreign_key: true,
-  on_delete: .Cascade,
-)
+@belongs_to(User.id, foreign_key: .{ on_delete: .Cascade })
 user_id: int,
 ```
 
 The referenced type must be visible to the model, including through an imported
-alias. `references` accepts a field reference from that same type; the derive resolves the actual
+alias. `@belongs_to` takes one argument: the model, or a field reference from that same type. The derive resolves the actual
 parent table and column, including overrides. The child and parent scalar
 types must agree; relation keys are `int` or `str`, including optional forms.
 The referenced field must be a primary key or a
 single-field UNIQUE key, including a declared single-field unique index.
 
 Both actions default to `.NoAction`. `.SetNull` requires an optional child
-field. `.SetDefault` requires `default_sql` on required fields; an application
+field. `.SetDefault` requires `@default_sql` on required fields; an application
 default does not count. The resulting value must satisfy the field and
 foreign-key constraints. SQLite connections enforce foreign
 keys by default, and violations remain `DbErrorKind::ForeignKeyViolation`.
@@ -60,9 +54,9 @@ models, cascades, SET NULL, restrictive defaults and nullable parent keys.
 
 The model and referenced field are compiler-resolved symbols. Completion,
 navigation, reference search and rename follow the imported type or alias.
-The field defaults to the parent's logical `id` field; specify
-`references: Team.code` for another key. A field on a different type is a
-compile-time error, even if both fields have the same name and type.
+`@belongs_to(Team)` points at the parent's logical `id` field; write
+`@belongs_to(Team.code)` for another key. The field carries its model, so the
+two cannot disagree.
 
 Actions use `ForeignKeyAction` variants: `.NoAction`, `.Restrict`,
 `.Cascade`, `.SetNull` and `.SetDefault`. Contextual variants need no
@@ -78,12 +72,12 @@ When upgrading from string attributes, change:
 to:
 
 ```rust
-@model(belongs_to: Team, references: Team.code, foreign_key: true, on_delete: .Cascade)
+@belongs_to(Team.code, foreign_key: .{ on_delete: .Cascade })
 ```
 
 The old string forms are rejected during compilation. Update the CLI and
 language server together with the package. Physical mappings such as
-`table: "teams"` and `column: "team_code"` remain strings. This source
+`@table("teams")` and `@column("team_code")` remain strings. This source
 migration preserves the generated database schema.
 
 ## Batches and transactions

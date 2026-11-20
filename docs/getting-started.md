@@ -67,7 +67,7 @@ generated types, SQL capture and contextual derive reflection; see
 
 ## What the first model generates
 
-`@derive(Model)` generates `User::create`, `User::query`, `User::find_or_error`,
+`deriving Model` generates `User::create`, `User::query`, `User::find_or_error`,
 a typed `User::changes()` patch and other helpers from the struct's fields.
 A generated integer key is omitted when calling `create`. `active = true`
 is a construction default, and the optional `note` starts as NULL.

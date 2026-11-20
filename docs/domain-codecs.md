@@ -25,13 +25,12 @@ impl StateCodec {
   }
 }
 
-@derive(Model)
-struct Account {
-  @model(primary_key: true)
+struct Account deriving Model {
+  @key
   id: int,
-  @model(codec: StateCodec)
+  @codec(StateCodec)
   state: State = .Active,
-  @model(codec: StateCodec)
+  @codec(StateCodec)
   previous_state: State?,
 }
 ```
@@ -70,7 +69,7 @@ needed by named patches.
 
 For example, the [shared model](../examples/domain_models.zolo) stores
 `Email(str)` with a text codec and `Credits(int)` with
-`@model(codec: CreditsCodec, storage: .Integer)`. `storage` requires `codec`.
+`@codec(CreditsCodec, storage: .Integer)`. `storage` is an argument of `@codec`.
 
 Optional fields bypass both functions for `nil`: explicit nil writes SQL NULL
 and a stored NULL decodes to nil. Construction defaults only apply during

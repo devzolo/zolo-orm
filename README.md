@@ -56,13 +56,12 @@ This is the complete [basic.zolo](examples/basic.zolo) program:
 use std::database::Database
 use orm::{Model, OrmError}
 
-@derive(Model)
-@model(table: "users")
-struct User {
-  @model(primary_key: true, generated: true)
+@table("users")
+struct User deriving Model {
+  @key(generated: true)
   id: int,
   name: str,
-  @model(unique: true)
+  @unique
   email: str,
   active: bool = true,
   note: str?,
@@ -105,13 +104,13 @@ and constraint failures.
 Relationship metadata uses the same symbols as application code:
 
 ```rust
-@model(belongs_to: Team, references: Team.code, foreign_key: true, on_delete: .Cascade)
+@belongs_to(Team.code, foreign_key: .{ on_delete: .Cascade })
 team_code: str,
 ```
 
-Omit `references` to use `Team.id`. Imported aliases work, and the
-referenced field must belong to the target type. Keep database names such as
-`column: "team_code"` as strings. See [typed declarations and upgrading](docs/relations-and-transactions.md#typed-relationship-declarations)
+Name only the model, as in `@belongs_to(Team)`, to point at `Team.id`. Imported
+aliases work, and the referenced field must belong to the target type. Keep
+database names such as `@column("team_code")` as strings. See [typed declarations and upgrading](docs/relations-and-transactions.md#typed-relationship-declarations)
 and the runnable [alias example](examples/typed_relations.zolo).
 
 ## Typed indexes and pages
@@ -119,7 +118,8 @@ and the runnable [alias example](examples/typed_relations.zolo).
 Use field references for composite indexes:
 
 ```rust
-@model(unique_indexes: #{tenant_email: [Member.tenant_id, Member.email]})
+@index("tenant_email", [.tenant_id, .email], unique: true)
+struct Member deriving Model { ... }
 ```
 
 The fields must belong to the annotated model. Renames remain visible to the
@@ -149,9 +149,9 @@ Omitted fields stay unchanged; explicit nil clears an optional field. Existing
 setters remain available for conditional patch construction. See
 [named patches](docs/models-and-writes.md#named-patches).
 
-Use `@model(codec: EmailCodec) email: Email` to keep a domain type in creation,
-patches, filters and projections while storing a scalar. Declare a
-`@derive(Query)` view to combine multiple model sources with named results.
+Use `@codec(EmailCodec) email: Email` to keep a domain type in creation,
+patches, filters and projections while storing a scalar. Write a
+struct that is `deriving Query` to combine multiple model sources with named results.
 See [domain codecs](docs/domain-codecs.md) and
 [composed queries](docs/composed-queries.md) for full declarations and limits.
 
@@ -212,7 +212,7 @@ the local ORM source. See [setup and compatibility](docs/errors-and-compatibilit
 
 Upsert creation values and update patches are separate: omitted patch fields
 stay unchanged, and an empty patch returns `nil` on conflict. A relation
-loader is explicit; `foreign_key: true` additionally enforces integrity.
+loader is explicit; a `foreign_key` argument on `@belongs_to` additionally enforces integrity.
 `create_table` creates missing objects; use migrations to evolve existing data.
 
 SQLite execution is supported on VM, native and LLVM backends.

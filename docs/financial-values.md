@@ -12,13 +12,12 @@ executed in this batch.
 ```zolo
 use orm::Model
 
-@derive(Model)
-struct Invoice {
-  @model(primary_key: true, generated: true)
+struct Invoice deriving Model {
+  @key(generated: true)
   id: int,
-  @model(precision: 18, scale: 2)
+  @decimal(precision: 18, scale: 2)
   amount: decimal,
-  @model(precision: 60, scale: 8)
+  @decimal(precision: 60, scale: 8)
   exchange_total: bigdecimal?,
 }
 ```
@@ -86,7 +85,7 @@ can convert decimal text to binary floating point. To persist exact values as
 text, opt in explicitly:
 
 ```zolo
-@model(storage: .Text)
+@decimal(storage: .Text)
 amount: decimal,
 ```
 

@@ -2,21 +2,20 @@
 
 [Documentation](README.md) · [Complete example](../examples/composed_queries.zolo) · [Declarations](../examples/composed_models.zolo)
 
-Use `@derive(Query)` to name the result of several related model sources.
+Write a struct `deriving Query` to name the result of several related model sources.
 Each field represents one source; the field's optionality chooses LEFT or
 INNER JOIN.
 
 ```rust
 use orm::Query
 
-@derive(Query)
-pub struct Directory {
+pub struct Directory deriving Query {
   pub person: Person,
-  @join(from: Directory.person, key: Person.team_id, references: Team.id)
+  @join(from: .person, keys: [Person.team_id], references: [Team.id])
   pub team: Team?,
-  @join(from: Directory.team, key: Team.organization_id, references: Organization.id)
+  @join(from: .team, keys: [Team.organization_id], references: [Organization.id])
   pub organization: Organization?,
-  @join(from: Directory.person, key: Person.manager_id, references: Person.id)
+  @join(from: .person, keys: [Person.manager_id], references: [Person.id])
   pub manager: Person?,
 }
 ```
@@ -31,14 +30,15 @@ or write methods. The individual models retain ownership of their schemas.
 
 ## Join edges
 
-The first source must be required. Every later source declares three references:
+The first source must be required. Every later source writes a `@join` with three arguments:
 
-| Option | Meaning |
+| Argument | Meaning |
 | --- | --- |
-| `from` | An earlier field of this same view. |
-| `key` | A field on that earlier source's model. |
-| `references` | A field on the model being joined. |
-| `keys` / `reference_keys` | Ordered field-reference lists for a composite join; do not mix with scalar key/references. |
+| `from` | An earlier field of this same view, written with a leading dot. |
+| `keys` | Ordered list of fields on that earlier source's model. |
+| `references` | Ordered list of fields on the model being joined, of the same length as `keys`. |
+
+A join on a single pair is a list of one. A composite join lists every pair in order. The compiler refuses a `from` that names a field of another model.
 
 Required sources use INNER JOIN; optional sources use LEFT JOIN. Both keys must
 have matching scalar types. Codec keys are rejected. Each source must be a model

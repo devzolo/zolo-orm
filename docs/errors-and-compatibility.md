@@ -51,7 +51,7 @@ fn describe_user(db: Database, requested_id: int) -> Result<str, OrmError> {
 Invalid model declarations, unknown fields, wrong filter types, duplicate
 columns, oversized identifiers and ambiguous generated method names are all
 compile errors. For example, fields named `id` and `id_not` would both generate
-`where_id_not`; rename the field and keep the column with `@model(column: "id_not")`.
+`where_id_not`; rename the field and keep the column with `@column("id_not")`.
 
 ## Compatibility
 

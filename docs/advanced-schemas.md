@@ -5,9 +5,8 @@
 Declare an ordered primary key with field references. A composite key generates a named value type:
 
 ```zolo
-@derive(Model)
-@model(primary_key: [Account.tenant_id, Account.id])
-struct Account {
+@key([.tenant_id, .id])
+struct Account deriving Model {
   tenant_id: int,
   id: int,
   name: str,
@@ -19,65 +18,61 @@ Account::changes(name: "Updated").apply(db, key).unwrap()
 account.delete(db).unwrap()
 ```
 
-`find`, `find_or_error`, `changes(...).apply`, `update`, `delete` and `upsert_by_key` use every key component. `account.key()` returns `AccountKey`. The order in `primary_key` controls DDL, bindings and pagination tie-breakers. Primary fields cannot appear in a patch. Key fields must be required scalar values; codec domains cannot be keys.
+`find`, `find_or_error`, `changes(...).apply`, `update`, `delete` and `upsert_by_key` use every key component. `account.key()` returns `AccountKey`. The order in `@key([...])` controls DDL, bindings and pagination tie-breakers. Primary fields cannot appear in a patch. Key fields must be required scalar values; codec domains cannot be keys.
 
-A one-field `primary_key: [Account.id]` keeps the existing scalar key parameter. The field-level `@model(primary_key: true)` form remains supported for one key. Do not combine it with the type-level list. Generated identity is available only for a single integer primary key.
+A one-field `@key([.id])` keeps the existing scalar key parameter. The field-level `@key` form remains supported for one key. Do not combine it with the list on the model. Generated identity (`@key(generated: true)`) is available only for a single integer primary key. A key that names a field of another model is refused by the compiler where it is written.
 
 ## Composite foreign keys
 
 The fields and references lists are ordered and have equal lengths:
 
 ```zolo
-@model(
-  primary_key: [Membership.tenant_id, Membership.id],
-  foreign_keys: #{
-    account: #{
-      fields: [Membership.tenant_id, Membership.account_id],
-      references: [Account.tenant_id, Account.id],
-      on_delete: .Cascade,
-    },
-  },
+@key([.tenant_id, .id])
+@foreign_key(
+  "account",
+  fields: [.tenant_id, .account_id],
+  references: [Account.tenant_id, Account.id],
+  on_delete: .Cascade,
 )
 ```
 
-Each target list must be one complete primary key, a column marked `unique`, or one declared `unique_indexes` key, in its declared order. One field from a composite PK is not independently unique. Partial and expression indexes cannot establish FK target uniqueness. `advanced_indexes` is not used as an FK uniqueness declaration; use `unique_indexes` for an ordinary column key.
+Each target list must be one complete primary key, a column marked `@unique`, or one unique `@index` over fields, in its declared order. One field from a composite PK is not independently unique. Partial and expression indexes cannot establish FK target uniqueness. An index written with `terms` or `predicate` is not used as an FK uniqueness declaration; use a unique `@index` over fields for an ordinary column key.
 
 All local fields belong to the declaring model; all target fields belong to the same parent. Storage types must agree. Codec fields are rejected. `SetNull` requires every local field to be optional. `SetDefault` requires a SQL default on each required field. Application defaults do not count as database defaults.
 
-The map name, such as `account`, identifies the descriptor in diagnostics. DDL emits an unnamed SQL constraint. Migrations preserve the grouped fields, order, target and actions; physical SQL constraint names are unsupported.
+The first argument, such as `"account"`, names the constraint and identifies it in diagnostics. The `fields` list must name fields of the declaring model. DDL emits an unnamed SQL constraint. Migrations preserve the grouped fields, order, target and actions; physical SQL constraint names are unsupported.
 
 A composite FK does not generate a scalar `belongs_to` loader. Compose a query view with matching typed lists:
 
 ```zolo
-@derive(Query)
-struct Directory {
+struct Directory deriving Query {
   membership: Membership,
   @join(
-    from: Directory.membership,
+    from: .membership,
     keys: [Membership.tenant_id, Membership.account_id],
-    reference_keys: [Account.tenant_id, Account.id],
+    references: [Account.tenant_id, Account.id],
   )
   account: Account,
 }
 ```
 
-`Account?` produces a LEFT join. The existing singular `key`/`references` pair remains available; do not mix it with `keys`/`reference_keys`. All source PK columns become pagination tie-breakers.
+`Account?` produces a LEFT join. `from` names an earlier source with a leading dot, and `keys` and `references` are lists of equal length, even for a single pair. All source PK columns become pagination tie-breakers.
 
 ## Directional, expression and partial indexes
 
 Index descriptors use checked records with contextual enum completion:
 
 ```zolo
-@model(advanced_indexes: #{
-  active_email: #{
-    unique: true,
-    terms: [
-      #{field: Account.tenant_id},
-      #{field: Account.email, transform: .Lower, direction: .Desc},
-    ],
-    predicate: [#{field: Account.active, kind: .IsTrue}],
-  },
-})
+@index(
+  "active_email",
+  unique: true,
+  terms: [
+    .{ field: .tenant_id },
+    .{ field: .email, transform: .Lower, direction: .Desc },
+  ],
+  predicate: [.{ field: .active, kind: .IsTrue }],
+)
+struct Account deriving Model { ... }
 ```
 
 Terms default to `transform: .Identity` and `direction: .Asc`. The supported transforms are `Identity`, `Lower`, `Upper`, `Length` and `Abs`. Text transforms require a string field; `Abs` requires a numeric field. Transforms cannot be applied to codec domains.

@@ -36,7 +36,16 @@ The larger schema/foreign-key examples retain edge-case regression coverage.
 - a `<Model>Insert` input type and typed upsert/statement methods for each
   declared primary/unique conflict target,
 - a row decoder that builds the struct from a driver row,
-- one `load_<field>` function per `belongs_to` relation.
+- one `load_<field>` function per `@belongs_to` relation.
+
+`pub mod marks` declares the decorators a model is written with (`@table`,
+`@key`, `@column`, `@unique`, `@index`, `@belongs_to`, `@foreign_key`,
+`@codec`, `@decimal`, `@default_sql`, `@revision`, `@redact`, `@scope` and
+`@join`). `Model` and `Query` are `derive` declarations that own these marks
+and emit sibling items; a struct requests one with `deriving Model` in its
+header. The generator reads a mark by naming its decorator, for example
+`field.mark(column)?.name`, `info.marks(index)` or `field.mark(key) != nil`.
+It does the same for any model reached through a type or field reference.
 
 The derive works on structured `quote` blocks and `syntax.ident`, so the
 generated code keeps the original type references. There is no runtime model
@@ -141,17 +150,19 @@ the rejected value.
 
 ## Indexes, foreign keys and upsert
 
-Type-level `indexes` and `unique_indexes` are maps from a logical name to an
-ordered `FieldRef` list. Field-level `index` is shorthand for one such index.
-The derive compares each reference's owner identity against `TypeInfo.identity`,
-then validates names and duplicate fields before converting logical fields to
-quoted SQL columns. Aliases preserve identity and unrelated same-name
-declarations remain distinct. The attribute schema recursively materializes
-references inside the maps and arrays, in both `opts` and authored decorators. Schema statements are deterministic and
+A type-level `@index` is one named index: a logical name and an ordered
+`FieldRef` list, with `unique: true` for a unique one. Field-level `@index` is
+shorthand for one such index. The compiler refuses a key, scope or index
+`fields` entry that names a field of another model. The derive compares each
+reference's owner identity against `TypeInfo.identity` (and still checks the
+owner of index `terms` and `predicate` references), then validates names and
+duplicate fields before converting logical fields to quoted SQL columns.
+Aliases preserve identity and unrelated same-name declarations remain
+distinct. Schema statements are deterministic and
 shared by `schema_sql`, `schema_statements`, `create_table` and the compiler's
 `@sql_schema(ddl)` metadata. Migrations consume the same DDL.
 
-Foreign keys are opt-in on `belongs_to`. Generic `TypeRef` and `FieldRef`
+Foreign keys are opt-in on `@belongs_to`, through its `foreign_key` argument. Generic `TypeRef` and `FieldRef`
 attribute values resolve against the consumer's visible type catalog and retain
 canonical declaration identity, imported binding syntax and reflected metadata.
 The ORM checks that an explicit field belongs to the same target declaration;
@@ -190,11 +201,11 @@ backends, while the VM has its own bridge and rollback path.
 
 ## Relations
 
-`belongs_to` generates an explicit loader instead of a lazy property. The
+`@belongs_to` generates an explicit loader instead of a lazy property. The
 loader deduplicates non-null parent keys, fetches the children with `IN` queries
 of at most 900 keys, and groups them back in the original parent order. A parent
 with a nil key receives an empty group. The loader does not add foreign-key DDL
-unless `foreign_key: true` is requested, does not wrap its reads in a transaction,
+unless a `foreign_key` argument is written on `@belongs_to`, does not wrap its reads in a transaction,
 and never runs when a field is accessed, which rules out hidden N+1 queries.
 
 ## Errors

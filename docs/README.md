@@ -35,8 +35,8 @@ include imports, declarations, a connection and an entry point.
   On reads, `first_row` wraps present values, including NULL, separately from absence.
 - **Insert and conflict:** upsert input supplies the new row; its explicit patch
   supplies the conflict update. An empty patch returns `nil` on conflict.
-- **Loading and integrity:** `belongs_to` enables a loader; `foreign_key: true`
-  additionally asks the database to enforce the relationship.
+- **Loading and integrity:** `@belongs_to` enables a loader; its `foreign_key`
+  argument additionally asks the database to enforce the relationship.
 
 For internals, see [Architecture](../ARCHITECTURE.md). For a sequence of
 commands with expected output, see [Examples](../examples/README.md).

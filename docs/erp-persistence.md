@@ -38,7 +38,7 @@ specific business diagnosis from that count.
 ## Optimistic revisions
 
 ```rust
-@model(version: true)
+@revision
 revision: int = 0,
 ```
 
@@ -64,16 +64,13 @@ revision. Use an explicit versioned update for an existing record.
 ## Explicit company/branch scope
 
 ```rust
-@derive(Model)
-@model(
-  primary_key: [Stock.company_id, Stock.id],
-  scope: [Stock.company_id],
-)
-struct Stock {
+@key([.company_id, .id])
+@scope([.company_id])
+struct Stock deriving Model {
   company_id: int,
   id: int,
   available: int,
-  @model(version: true)
+  @revision
   revision: int = 0,
 }
 
@@ -158,7 +155,7 @@ SQL do not secretly run application rules. Route imports, jobs and UI commands
 through the same service when they must share validation. Business processes
 such as confirming or invoicing an order compose their effects in that service.
 
-A field marked @model(redact: true) still appears as changed, but its before and
+A field marked @redact still appears as changed, but its before and
 after values are absent from FieldChange and audit_json never includes it.
 The typed snapshots remain available to domain validation. audit_json also
 requires an explicit allowlist of fields.
