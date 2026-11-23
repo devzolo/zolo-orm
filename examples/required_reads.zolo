@@ -15,7 +15,7 @@ struct ReadAccount deriving Model {
 struct ReadToken deriving Model {
   @key
   @column("token_key")
-  key: str,
+  token: str,
   label: str,
 }
 
@@ -77,7 +77,7 @@ fn exercise_required_reads() {
   expect_missing(base.limit(0).first_or_error(db), "ReadAccount")
   // Mapped string keys retain their type and use bound parameters.
   let token = "session' OR 1=1 --"
-  ReadToken::create(db, key: token, label: "signed-in session").unwrap()
+  ReadToken::create(db, token:, label: "signed-in session").unwrap()
   assert(ReadToken::find_or_error(db, token).unwrap().label == "signed-in session")
   expect_missing(ReadToken::find_or_error(db, "absent"), "ReadToken")
 }
