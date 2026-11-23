@@ -6,7 +6,7 @@
 
 use std::fs
 use std::path
-use common::{package_root, user_args, run_step, executable_path}
+use common::{package_root, user_args, fail, run_step, executable_path}
 
 @cli(name: "test_backends")
 struct Args {
@@ -19,7 +19,7 @@ let zolo = args.zolo
 let root = package_root()
 let examples = path.join(root, "examples")
 let output_root = path.join(root, "target", "backend-tests")
-fs.mkdir(output_root)
+if fs.mkdir(output_root).is_err() { fail("cannot create {output_root}") }
 
 run_step(sh"{zolo} install".cwd(examples), "install examples")
 

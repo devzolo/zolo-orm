@@ -36,7 +36,7 @@ if runs < 1 || runs > 100 { fail("--runs must be between 1 and 100") }
 let root = package_root()
 let examples = path.join(root, "examples")
 let output_root = path.join(root, "target", "benchmarks")
-fs.mkdir(output_root)
+if fs.mkdir(output_root).is_err() { fail("cannot create {output_root}") }
 
 run_step(sh"{zolo} install".cwd(examples), "install examples")
 
@@ -85,5 +85,6 @@ let report = #{
     samples: samples,
 }
 let encoded = json.encode(report)
-fs.write(path.join(output_root, "{backend}.json"), encoded)
+let report_path = path.join(output_root, "{backend}.json")
+if fs.write(report_path, encoded).is_err() { fail("cannot write {report_path}") }
 print(encoded)
