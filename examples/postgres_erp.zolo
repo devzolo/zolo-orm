@@ -2,7 +2,7 @@
 //! No top-level connection or execution; ordinary example runners do not invoke it.
 //! Source only: this fixture has not been compiled or executed.
 use std::database::Database
-use orm::{Model, OrmError, Sql, transact}
+use orm::{Model, OrmError, Sql, LockWait, transact}
 
 @table("orm_erp_ledger")
 @scope([.company_id])
@@ -48,7 +48,7 @@ pub fn verify_postgres_erp(db: Database) -> Result<bool, OrmError> {
 
   let locked = transact(db, |tx| -> Result<int, OrmError> {
     let rows = Ledger::scoped(tx.db(), company_id: 7).query()
-      .filter(|row| row.id == first.id).locked(tx, .NoWait)?
+      .filter(|row| row.id == first.id).locked(tx, LockWait::NoWait)?
     return Result::Ok(rows.len())
   })?
   assert(locked == 1)
