@@ -1,6 +1,6 @@
 //! Presence-aware reads and deterministic numbered/keyset pagination.
 use std::database::Database
-use orm::{Model, OrmError, QueryPlan}
+use orm::{Model, OrmError, Projection, QueryPlan}
 
 @table("page_buckets")
 struct Bucket deriving Model {

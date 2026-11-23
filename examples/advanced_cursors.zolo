@@ -1,6 +1,6 @@
 //! Mixed ordering, nullable values, hidden keys and joined cursor continuations.
 use std::database::Database
-use orm::Model
+use orm::{Model, Projection}
 use composed_views::{Directory, seed_directory}
 
 @table("cursor_events")
