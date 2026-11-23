@@ -5,5 +5,5 @@ name = "orm"
 version = "0.1.0"
 source = "path+.."
 source_origin = "path+.."
-content = "blake3:7462c7d9709d957c70f8e256b5d7be4fa1688d7c5a9b0237b24a140d1442a1d3"
+content = "blake3:33a39a0bccfb6e8d0f106001676727049e6207806422c68c33d9861ab444d22c"
 dependencies = []
