@@ -18,7 +18,6 @@ struct Collision deriving Model {
   CollisionSchema_: str,
   Collision: str,
   CollisionInsert: str,
-  insert_statement: str,
   Result: str,
   OrmError: str,
   label: str = default_label(),
@@ -41,7 +40,6 @@ let value = Collision::create(
   CollisionSchema_: "field shadows first schema fallback",
   Collision: "field shadows model name",
   CollisionInsert: "field shadows generated insert type",
-  insert_statement: "field shadows statement method",
   Result: "field shadows result type",
   OrmError: "field shadows error type",
 ).unwrap()
@@ -76,7 +74,6 @@ let insert = CollisionInsert_ {
   CollisionSchema_: value.CollisionSchema_,
   Collision: value.Collision,
   CollisionInsert: value.CollisionInsert,
-  insert_statement: value.insert_statement,
   Result: value.Result,
   OrmError: value.OrmError,
 }
@@ -86,7 +83,6 @@ let updated = Collision::upsert_by_id(db, insert, Collision::changes().set_label
 )
 assert(updated.label == "updated")
 assert(updated.CollisionInsert == "field shadows generated insert type")
-assert(updated.insert_statement == "field shadows statement method")
 assert(updated.Result == value.Result)
 assert(updated.OrmError == value.OrmError)
 print("orm hygiene: ok")
