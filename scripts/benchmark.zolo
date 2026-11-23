@@ -63,10 +63,11 @@ for iteration in 0..(runs + 1) {
     let out = run_once()
     if out.status != 0 { fail("benchmark failed ({backend}):\n{out.stdout}{out.stderr}") }
     let timings = regex.find("single_ms=([0-9.]+) batch_ms=([0-9.]+)", out.stdout)
-    if timings is nil { fail("missing timings: {out.stdout}") }
+    let groups: [str] = timings?.groups ?? []
+    if groups.len() != 2 { fail("missing timings: {out.stdout}") }
     if iteration == 0 { continue }
-    let single_ms: float = tonumber(timings.groups[0])
-    let batch_ms: float = tonumber(timings.groups[1])
+    let single_ms = groups[0].parse<float>().unwrap()
+    let batch_ms = groups[1].parse<float>().unwrap()
     single_samples.push(single_ms)
     batch_samples.push(batch_ms)
     samples.push(#{single_ms: single_ms, batch_ms: batch_ms})
