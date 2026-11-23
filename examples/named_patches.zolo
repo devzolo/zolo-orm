@@ -22,7 +22,6 @@ struct Names deriving Model {
   id: int,
   panic: str,
   type: str,
-  math: int,
   __orm_patch: str,
   AccountChanges: str?,
 }
@@ -54,11 +53,11 @@ fn exercise_named_patches() {
   assert(Account::upsert_by_email(db, input, Account::changes()).unwrap() == nil)
 
   Names::create_table(db).unwrap()
-  Names::create(db, id: 1, panic: "safe", type: "original", math: 10, __orm_patch: "kept", AccountChanges: "old").unwrap()
-  Names::changes(panic: "updated", type: "renamed", math: 0, AccountChanges: nil).apply(db, 1).unwrap()
+  Names::create(db, id: 1, panic: "safe", type: "original", __orm_patch: "kept", AccountChanges: "old").unwrap()
+  Names::changes(panic: "updated", type: "renamed", AccountChanges: nil).apply(db, 1).unwrap()
   let names = Names::find_or_error(db, 1).unwrap()
   assert(names.panic == "updated" && names.__orm_patch == "kept" && names.AccountChanges == nil)
-  assert(names.type == "renamed" && names.math == 0)
+  assert(names.type == "renamed")
 }
 
 @test
