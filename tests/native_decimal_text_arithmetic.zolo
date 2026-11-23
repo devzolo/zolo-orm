@@ -5,4 +5,4 @@ struct TextAmount deriving Model {
   @decimal(storage: .Text)
   amount: decimal,
 }
-let wrong = TextAmount::query().select(|row| row.amount * 2d)
+let wrong = TextAmount::query().select(|row| row.amount * 2)
