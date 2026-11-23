@@ -17,7 +17,7 @@ fn exercise_domain_codecs() {
   assert(Account::schema_sql().contains("\"email\" TEXT NOT NULL"))
   assert(Account::schema_sql().contains("\"credits\" BIGINT NOT NULL"))
   let email = Email.new("ana@example.test")
-  let created = Account::create(db, id: 1, email, credits: Credits.new(10)).unwrap()
+  let created = Account::create(db, id: 1, email:, credits: Credits.new(10)).unwrap()
   assert(created.email.unwrap() == "ana@example.test" && created.state == State::Active)
   assert(created.previous_state == nil && created.credits.unwrap() == 10)
   let active = State::Active

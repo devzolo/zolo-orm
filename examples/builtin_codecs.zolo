@@ -51,7 +51,7 @@ fn exercise_builtin_codecs() {
   let precise = ExactDecimal::parse("9007199254740993.12345678901234567890123456789").unwrap()
   let day = Date::parse("2024-02-29").unwrap()
   let instant = Timestamp::parse("2024-02-29T23:59:59.1Z").unwrap()
-  Document::create(db, id: 1, day, created_at: instant, amount: precise,
+  Document::create(db, id: 1, day:, created_at: instant, amount: precise,
     payload: blob, optional_payload: nil).unwrap()
   let row = Document::find_or_error(db, 1).unwrap()
   assert(row.day.unwrap() == "2024-02-29")
@@ -70,7 +70,7 @@ fn exercise_builtin_codecs() {
   assert(selected[0].bytes().len() == 0)
   let bound = blob
   assert(Document::query().filter(|document| document.optional_payload == bound).count(db).unwrap() == 1)
-  Document::create(db, id: 2, day, created_at: instant, amount: precise,
+  Document::create(db, id: 2, day:, created_at: instant, amount: precise,
     payload: blob, optional_payload: blob).unwrap()
   let first = Document::query().where_optional_payload(blob).seek_page(db, size: 1).unwrap()
   assert(first.next_cursor != nil)
