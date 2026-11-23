@@ -1,6 +1,6 @@
 //! Built-in domains use canonical, lossless storage and real BLOB parameters.
-use std::database::Database
-use orm::{Model, OrmError, Date, DateCodec, Timestamp, TimestampCodec, ExactDecimal, DecimalCodec, Blob, BlobCodec}
+use std::database::{Database, Blob}
+use orm::{Model, OrmError, Date, DateCodec, Timestamp, TimestampCodec, ExactDecimal, DecimalCodec, BlobCodec}
 
 @table("builtin_documents")
 struct Document deriving Model {
